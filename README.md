@@ -33,13 +33,21 @@ Claude Cowork is a special Claude Desktop build that can autonomously work insid
 
 ---
 
+## ![](.github/assets/icons/alert.png) Status
+
+- **Unofficial research preview**: This is reverse-engineered and may break when Claude Desktop updates.
+- **Linux support**: Currently targets **Linux x86_64 + X11** (Wayland support is not implemented).
+- **Access**: Requires your own Claude Desktop DMG and an account with Cowork enabled.
+
+---
+
 ## ![](.github/assets/icons/checkbox.png) Requirements
 
 - **Linux x86_64** (tested on Arch Linux, kernel 6.17.9)
 - **Node.js / npm** (for Electron)
 - **p7zip** (to extract the macOS DMG)
 - **Claude Desktop DMG** (download from [claude.ai/download](https://claude.ai/download))
-- **Claude Max subscription** ($200/month) for Cowork access
+- **Claude Max subscription** for Cowork access
 
 ---
 
@@ -367,6 +375,8 @@ This project includes security hardening:
 > This project is for **educational and research purposes**. Claude Desktop is proprietary software owned by Anthropic PBC. Use of Cowork requires a valid Claude Max subscription.
 >
 > This repository contains only stub implementations and patches—**not** the Claude Desktop application itself. You must obtain Claude Desktop directly from Anthropic.
+>
+> This project is **not affiliated with, endorsed by, or sponsored by** Anthropic. "Claude" is a trademark of Anthropic PBC.
 
 ---
 
