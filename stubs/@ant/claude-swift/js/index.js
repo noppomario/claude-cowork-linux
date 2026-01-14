@@ -16,26 +16,75 @@
  *
  * Path translations performed:
  *   - /usr/local/bin/claude -> ~/.config/Claude/claude-code-vm/2.1.5/claude
- *   - /sessions/... -> ~/.config/Claude/cowork-sessions/...
+ *   - /sessions/... -> ~/.local/share/claude-cowork/sessions/...
+ *
+ * Security hardening applied:
+ *   - Command injection prevention (execFile instead of exec)
+ *   - Path traversal protection
+ *   - Environment variable filtering
+ *   - Secure file permissions
  *
  * Based on reverse engineering of swift_addon.node via pyghidra-lite
  */
 console.log('[claude-swift-stub] LOADING MODULE - this confirms our stub is being used');
 const EventEmitter = require("events");
-const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require("child_process");
+const { spawn: nodeSpawn, spawnSync: nodeSpawnSync, execFileSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
-// File-based trace log that can't be filtered
-const TRACE_FILE = "/tmp/claude-swift-trace.log";
+// SECURITY: Log to user-writable location with restricted permissions
+const LOG_DIR = path.join(os.homedir(), '.local/share/claude-cowork/logs');
+const TRACE_FILE = path.join(LOG_DIR, 'claude-swift-trace.log');
+
+// Ensure log directory exists with secure permissions
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+} catch (e) {}
+
 function trace(msg) {
   const ts = new Date().toISOString();
   const line = `[${ts}] ${msg}\n`;
   console.log('[TRACE] ' + msg);
-  try { fs.appendFileSync(TRACE_FILE, line); } catch(e) {}
+  try {
+    // SECURITY: Append with restrictive permissions
+    fs.appendFileSync(TRACE_FILE, line, { mode: 0o600 });
+  } catch(e) {}
 }
 trace("=== MODULE LOADING ===");
-const path = require("path");
-const os = require("os");
+
+// SECURITY: Allowlist of environment variables to pass to spawned process
+const ENV_ALLOWLIST = [
+  'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'LC_CTYPE',
+  'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS',
+  'NODE_ENV', 'ELECTRON_RUN_AS_NODE',
+  // Claude-specific
+  'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'
+];
+
+function filterEnv(baseEnv, additionalEnv) {
+  const filtered = {};
+  for (const key of ENV_ALLOWLIST) {
+    if (baseEnv[key] !== undefined) {
+      filtered[key] = baseEnv[key];
+    }
+  }
+  // Additional env vars from the app are trusted (come from Claude Desktop)
+  if (additionalEnv) {
+    Object.assign(filtered, additionalEnv);
+  }
+  return filtered;
+}
+
+// SECURITY: Validate path doesn't escape intended directory
+function isPathSafe(basePath, targetPath) {
+  const resolved = path.resolve(basePath, targetPath);
+  return resolved.startsWith(path.resolve(basePath) + path.sep) || resolved === path.resolve(basePath);
+}
+
+// Sessions directory in user space (not /sessions)
+const SESSIONS_BASE = path.join(os.homedir(), '.local/share/claude-cowork/sessions');
 
 class SwiftAddonStub extends EventEmitter {
   constructor() {
@@ -89,12 +138,14 @@ class SwiftAddonStub extends EventEmitter {
       },
       show: (options) => {
         console.log('[claude-swift] notifications.show()', options && options.title);
-        const { execSync } = require('child_process');
         try {
-          const title = (options && options.title) || 'Claude';
-          const body = (options && options.body) || '';
-          execSync('notify-send "' + title + '" "' + body + '" 2>/dev/null');
-        } catch (e) {}
+          const title = String((options && options.title) || 'Claude').substring(0, 200);
+          const body = String((options && options.body) || '').substring(0, 1000);
+          // SECURITY: Use execFileSync with argument array to prevent command injection
+          execFileSync('notify-send', [title, body], { timeout: 5000, stdio: 'ignore' });
+        } catch (e) {
+          // Notification failed - not critical
+        }
         return Promise.resolve({ id: Date.now().toString() });
       },
       close: (id) => {
@@ -129,7 +180,6 @@ class SwiftAddonStub extends EventEmitter {
 
     // VM Management (nested object)
     // CRITICAL: The app accesses methods via module.default.vm, so all methods must be here
-    // Create reference to parent for arrow functions
     const self = this;
 
     /**
@@ -144,7 +194,6 @@ class SwiftAddonStub extends EventEmitter {
         connected: self._guestConnected
       }),
 
-      // THIS IS THE KEY METHOD - called via Si() which returns this.vm
       setEventCallbacks: (onStdout, onStderr, onExit, onError, onNetworkStatus) => {
         trace('vm.setEventCallbacks() CALLED');
         console.log('[claude-swift] vm.setEventCallbacks() called - REGISTERING CALLBACKS');
@@ -173,43 +222,54 @@ class SwiftAddonStub extends EventEmitter {
 
       /**
        * Spawn a process - This is called to launch the Claude Code binary
-       * @param {string} id - Unique process ID for tracking
-       * @param {string} processName - Display name for the process
-       * @param {string} command - Command to run (VM path, will be translated)
-       * @param {string[]} args - Arguments (may contain VM paths)
-       * @param {object} options - Spawn options
-       * @param {object} envVars - Environment variables to set
-       * @param {array} additionalMounts - Ignored (VM-specific)
-       * @param {boolean} isResume - Whether this is resuming an existing session
-       * @param {array} allowedDomains - Ignored (VM-specific)
-       * @param {string} sharedCwdPath - Working directory
        */
       spawn: (id, processName, command, args, options, envVars, additionalMounts, isResume, allowedDomains, sharedCwdPath) => {
         trace('vm.spawn() id=' + id + ' cmd=' + command + ' args=' + JSON.stringify(args));
 
-        // Translate VM paths to host paths (the binary expects VM paths)
+        // SECURITY: Validate command is the expected Claude binary
         let hostCommand = command;
         if (command === '/usr/local/bin/claude') {
           hostCommand = path.join(os.homedir(), '.config/Claude/claude-code-vm/2.1.5/claude');
           trace('Translated command: ' + command + ' -> ' + hostCommand);
+        } else {
+          // SECURITY: Only allow the expected command
+          trace('SECURITY: Unexpected command blocked: ' + command);
+          if (self._onError) self._onError(id, 'Unexpected command: ' + command, '');
+          return { success: false, error: 'Unexpected command' };
         }
 
-        // Translate VM paths in args (e.g., /sessions/... -> ~/.config/Claude/sessions/...)
-        const sessionsDir = path.join(os.homedir(), '.config/Claude/cowork-sessions');
+        // SECURITY: Verify binary exists and is in expected location
+        const expectedDir = path.join(os.homedir(), '.config/Claude/claude-code-vm');
+        if (!hostCommand.startsWith(expectedDir)) {
+          trace('SECURITY: Command outside expected directory: ' + hostCommand);
+          if (self._onError) self._onError(id, 'Invalid binary path', '');
+          return { success: false, error: 'Invalid binary path' };
+        }
+
+        // Translate VM paths in args with path traversal protection
         let hostArgs = (args || []).map(arg => {
           if (typeof arg === 'string' && arg.startsWith('/sessions/')) {
-            const translated = arg.replace('/sessions/', sessionsDir + '/');
+            // Extract session path component
+            const sessionPath = arg.substring('/sessions/'.length);
+
+            // SECURITY: Validate no path traversal
+            if (sessionPath.includes('..') || !isPathSafe(SESSIONS_BASE, sessionPath)) {
+              trace('SECURITY: Path traversal blocked: ' + arg);
+              return arg; // Return original (will fail gracefully)
+            }
+
+            const translated = path.join(SESSIONS_BASE, sessionPath);
             trace('Translated arg: ' + arg + ' -> ' + translated);
             return translated;
           }
           return arg;
         });
 
-        // Ensure sessions directory exists
+        // Ensure sessions directory exists with secure permissions
         try {
-          if (!fs.existsSync(sessionsDir)) {
-            fs.mkdirSync(sessionsDir, { recursive: true });
-            trace('Created sessions dir: ' + sessionsDir);
+          if (!fs.existsSync(SESSIONS_BASE)) {
+            fs.mkdirSync(SESSIONS_BASE, { recursive: true, mode: 0o700 });
+            trace('Created sessions dir: ' + SESSIONS_BASE);
           }
         } catch (e) {
           trace('Failed to create sessions dir: ' + e.message);
@@ -254,7 +314,7 @@ class SwiftAddonStub extends EventEmitter {
     console.log('[claude-swift-stub] Constructor complete. vm.setEventCallbacks type:', typeof this.vm.setEventCallbacks);
   }
 
-  // TOP-LEVEL METHODS
+  // TOP-LEVEL METHODS (for API compatibility)
   setEventCallbacks(onStdout, onStderr, onExit, onError, onNetworkStatus) {
     console.log('[claude-swift] setEventCallbacks() called - REGISTERING CALLBACKS');
     this._onStdout = onStdout;
@@ -267,7 +327,6 @@ class SwiftAddonStub extends EventEmitter {
     }
   }
 
-  // VM lifecycle methods - called directly on addon instance
   async startVM(bundlePath, memoryGB) {
     console.log('[claude-swift] startVM() bundlePath=' + bundlePath + ' memoryGB=' + memoryGB);
     this._guestConnected = true;
@@ -280,7 +339,6 @@ class SwiftAddonStub extends EventEmitter {
     return { success: true };
   }
 
-  // Method aliases for API compatibility
   kill(id, signal) {
     console.log('[claude-swift] kill(' + id + ', ' + signal + ')');
     return this.killProcess(id);
@@ -293,8 +351,8 @@ class SwiftAddonStub extends EventEmitter {
   spawn(id, processName, command, args, options, envVars, additionalMounts, isResume, allowedDomains, sharedCwdPath) {
     console.log('[claude-swift] spawn() id=' + id + ' cmd=' + command + ' args=' + JSON.stringify(args));
     try {
-      const env = Object.assign({}, process.env);
-      if (envVars) Object.assign(env, envVars);
+      // SECURITY: Filter environment variables
+      const env = filterEnv(process.env, envVars);
       const cwd = sharedCwdPath || (options && options.cwd) || process.cwd();
       const proc = nodeSpawn(command, args || [], Object.assign({ cwd: cwd, env: env, stdio: ['pipe', 'pipe', 'pipe'] }, options || {}));
       this._processes.set(id, proc);
@@ -306,9 +364,8 @@ class SwiftAddonStub extends EventEmitter {
       if (proc.stdout) {
         proc.stdout.on('data', function(data) {
           stdoutBuffer += data.toString();
-          // Split on newlines and send complete lines
           const lines = stdoutBuffer.split('\n');
-          stdoutBuffer = lines.pop(); // Keep incomplete line in buffer
+          stdoutBuffer = lines.pop();
           for (const line of lines) {
             if (line.trim() && self._onStdout) {
               trace('stdout line: ' + line.substring(0, 100) + '...');
@@ -331,7 +388,6 @@ class SwiftAddonStub extends EventEmitter {
         });
       }
       proc.on('exit', function(code, signal) {
-        // Flush remaining buffers
         if (stdoutBuffer.trim() && self._onStdout) {
           self._onStdout(id, stdoutBuffer);
         }
@@ -414,7 +470,6 @@ const instance = new SwiftAddonStub();
 trace('Instance created. vm=' + typeof instance.vm + ' vm.setEventCallbacks=' + typeof instance.vm.setEventCallbacks);
 console.log('[claude-swift-stub] Exporting instance. Instance type:', typeof instance, 'setEventCallbacks:', typeof instance.setEventCallbacks);
 
-// Export for both CommonJS and ESM
 module.exports = instance;
 module.exports.default = instance;
 trace('Module exports set. default.vm.setEventCallbacks=' + typeof module.exports.default.vm.setEventCallbacks);

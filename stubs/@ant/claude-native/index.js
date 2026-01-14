@@ -24,8 +24,11 @@ class AuthRequest extends EventEmitter {
 
   start(url, callbackUrl) {
     // Open URL in system browser and listen for callback
-    const { exec } = require('child_process');
-    exec(`xdg-open "${url}"`);
+    // SECURITY: Use execFile to prevent command injection
+    const { execFile } = require('child_process');
+    execFile('xdg-open', [url], (err) => {
+      if (err) console.error('[claude-native] Failed to open browser:', err.message);
+    });
 
     // The app should handle the OAuth callback via deep link or manual paste
     setTimeout(() => {

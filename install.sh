@@ -137,31 +137,45 @@ else
     exit 1
 fi
 
-# Step 4: Create /sessions directory
+# Step 4: Create /sessions symlink (secure alternative to 777 directory)
 echo ""
-echo "Step 4: Creating required directories..."
+echo "Step 4: Setting up session storage..."
 
-if [ -d "/sessions" ] && [ -w "/sessions" ]; then
-    success "/sessions directory exists"
+USER_SESSIONS="$HOME/.local/share/claude-cowork/sessions"
+mkdir -p "$USER_SESSIONS"
+chmod 700 "$USER_SESSIONS"
+success "User session directory: $USER_SESSIONS"
+
+# The Claude binary has hardcoded /sessions path - we symlink it to user space
+if [ -L "/sessions" ]; then
+    # Already a symlink
+    LINK_TARGET=$(readlink /sessions)
+    if [ "$LINK_TARGET" = "$USER_SESSIONS" ]; then
+        success "/sessions symlink already points to user space"
+    else
+        warn "/sessions symlink exists but points to: $LINK_TARGET"
+        echo "  Expected: $USER_SESSIONS"
+    fi
+elif [ -d "/sessions" ]; then
+    warn "/sessions exists as a directory (not symlink)"
+    echo "  For better security, consider removing it and using a symlink:"
+    echo "  sudo rm -rf /sessions && sudo ln -s $USER_SESSIONS /sessions"
 else
-    warn "/sessions directory needs to be created (requires sudo)"
-    echo "  The Claude binary has hardcoded internal paths that require this."
+    info "/sessions needs to be created as a symlink (requires sudo once)"
+    echo "  This is more secure than a world-writable directory."
+    echo "  The symlink will point to: $USER_SESSIONS"
     echo ""
-    read -p "Create /sessions with sudo? (y/n) " -n 1 -r
+    read -p "Create /sessions symlink with sudo? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        sudo mkdir -p /sessions
-        sudo chmod 777 /sessions
-        success "/sessions created"
+        sudo ln -s "$USER_SESSIONS" /sessions
+        success "/sessions -> $USER_SESSIONS (symlink created)"
     else
-        error "Cannot continue without /sessions"
-        echo "  Run manually: sudo mkdir -p /sessions && sudo chmod 777 /sessions"
-        exit 1
+        warn "Skipping /sessions symlink"
+        echo "  The app may fail. Run manually:"
+        echo "  sudo ln -s $USER_SESSIONS /sessions"
     fi
 fi
-
-mkdir -p "$HOME/.config/Claude/cowork-sessions"
-success "Session directories ready"
 
 # Step 5: Install npm dependencies
 echo ""
