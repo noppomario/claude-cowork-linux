@@ -165,6 +165,152 @@ class SwiftAddonStub extends EventEmitter {
       },
       getSessionId: () => {
         return 'linux-session-' + Date.now();
+      },
+      // Get list of open documents (Linux implementation)
+      getOpenDocuments: () => {
+        console.log('[claude-swift] desktop.getOpenDocuments()');
+        // On Linux, we can check recent files or return empty
+        // Could integrate with GTK recent files or track opened files
+        return Promise.resolve([]);
+      },
+      // Get list of open windows
+      getOpenWindows: () => {
+        console.log('[claude-swift] desktop.getOpenWindows()');
+        try {
+          // Try wmctrl first, fall back to empty
+          const { execFileSync } = require('child_process');
+          const output = execFileSync('wmctrl', ['-l'], { encoding: 'utf-8', timeout: 2000 });
+          const windows = output.trim().split('\n').filter(Boolean).map(line => {
+            const parts = line.split(/\s+/);
+            return {
+              id: parts[0],
+              desktop: parts[1],
+              title: parts.slice(3).join(' ')
+            };
+          });
+          return Promise.resolve(windows);
+        } catch (e) {
+          return Promise.resolve([]);
+        }
+      },
+      // Open file with default application
+      openFile: (filePath) => {
+        console.log('[claude-swift] desktop.openFile()', filePath);
+        try {
+          const { execFile } = require('child_process');
+          execFile('xdg-open', [filePath], (err) => {
+            if (err) console.error('[claude-swift] openFile error:', err.message);
+          });
+          return Promise.resolve(true);
+        } catch (e) {
+          return Promise.resolve(false);
+        }
+      },
+      // Reveal file in file manager
+      revealFile: (filePath) => {
+        console.log('[claude-swift] desktop.revealFile()', filePath);
+        try {
+          const { execFile } = require('child_process');
+          const dir = path.dirname(filePath);
+          // Try nautilus first (GNOME), fall back to xdg-open
+          execFile('nautilus', ['--select', filePath], (err) => {
+            if (err) {
+              // Fall back to opening the directory
+              execFile('xdg-open', [dir], () => {});
+            }
+          });
+          return Promise.resolve(true);
+        } catch (e) {
+          return Promise.resolve(false);
+        }
+      },
+      // Preview file (Quick Look equivalent)
+      previewFile: (filePath) => {
+        console.log('[claude-swift] desktop.previewFile()', filePath);
+        try {
+          const { execFile } = require('child_process');
+          // Try gnome-sushi (GNOME Quick Look), fall back to xdg-open
+          execFile('gnome-sushi', [filePath], (err) => {
+            if (err) {
+              execFile('xdg-open', [filePath], () => {});
+            }
+          });
+          return Promise.resolve(true);
+        } catch (e) {
+          return Promise.resolve(false);
+        }
+      }
+    };
+
+    // File system operations
+    this.files = {
+      // Read file contents
+      read: (filePath) => {
+        console.log('[claude-swift] files.read()', filePath);
+        try {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          return Promise.resolve(content);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      },
+      // Write file contents
+      write: (filePath, content) => {
+        console.log('[claude-swift] files.write()', filePath);
+        try {
+          fs.writeFileSync(filePath, content, 'utf-8');
+          return Promise.resolve(true);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      },
+      // Check if file exists
+      exists: (filePath) => {
+        return Promise.resolve(fs.existsSync(filePath));
+      },
+      // Get file stats
+      stat: (filePath) => {
+        console.log('[claude-swift] files.stat()', filePath);
+        try {
+          const stats = fs.statSync(filePath);
+          return Promise.resolve({
+            size: stats.size,
+            isFile: stats.isFile(),
+            isDirectory: stats.isDirectory(),
+            created: stats.birthtime,
+            modified: stats.mtime,
+            accessed: stats.atime
+          });
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      },
+      // List directory contents
+      list: (dirPath) => {
+        console.log('[claude-swift] files.list()', dirPath);
+        try {
+          const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+          return Promise.resolve(entries.map(e => ({
+            name: e.name,
+            isFile: e.isFile(),
+            isDirectory: e.isDirectory(),
+            path: path.join(dirPath, e.name)
+          })));
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      },
+      // Watch file for changes
+      watch: (filePath, callback) => {
+        console.log('[claude-swift] files.watch()', filePath);
+        try {
+          const watcher = fs.watch(filePath, (eventType, filename) => {
+            callback({ type: eventType, filename });
+          });
+          return { close: () => watcher.close() };
+        } catch (e) {
+          return { close: () => {} };
+        }
       }
     };
 
