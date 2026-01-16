@@ -222,9 +222,15 @@ class SwiftAddonStub extends EventEmitter {
       // Open file with default application
       openFile: (filePath) => {
         console.log('[claude-swift] desktop.openFile()', filePath);
+        // Translate /sessions/... paths to host paths
+        let hostPath = filePath;
+        if (typeof filePath === 'string' && filePath.startsWith('/sessions/')) {
+          hostPath = path.join(SESSIONS_BASE, filePath.substring('/sessions/'.length));
+          console.log('[claude-swift] desktop.openFile() translated to:', hostPath);
+        }
         try {
           const { execFile } = require('child_process');
-          execFile('xdg-open', [filePath], (err) => {
+          execFile('xdg-open', [hostPath], (err) => {
             if (err) console.error('[claude-swift] openFile error:', err.message);
           });
           return Promise.resolve(true);
@@ -235,11 +241,17 @@ class SwiftAddonStub extends EventEmitter {
       // Reveal file in file manager
       revealFile: (filePath) => {
         console.log('[claude-swift] desktop.revealFile()', filePath);
+        // Translate /sessions/... paths to host paths
+        let hostPath = filePath;
+        if (typeof filePath === 'string' && filePath.startsWith('/sessions/')) {
+          hostPath = path.join(SESSIONS_BASE, filePath.substring('/sessions/'.length));
+          console.log('[claude-swift] desktop.revealFile() translated to:', hostPath);
+        }
         try {
           const { execFile } = require('child_process');
-          const dir = path.dirname(filePath);
+          const dir = path.dirname(hostPath);
           // Try nautilus first (GNOME), fall back to xdg-open
-          execFile('nautilus', ['--select', filePath], (err) => {
+          execFile('nautilus', ['--select', hostPath], (err) => {
             if (err) {
               // Fall back to opening the directory
               execFile('xdg-open', [dir], () => {});
@@ -253,12 +265,18 @@ class SwiftAddonStub extends EventEmitter {
       // Preview file (Quick Look equivalent)
       previewFile: (filePath) => {
         console.log('[claude-swift] desktop.previewFile()', filePath);
+        // Translate /sessions/... paths to host paths
+        let hostPath = filePath;
+        if (typeof filePath === 'string' && filePath.startsWith('/sessions/')) {
+          hostPath = path.join(SESSIONS_BASE, filePath.substring('/sessions/'.length));
+          console.log('[claude-swift] desktop.previewFile() translated to:', hostPath);
+        }
         try {
           const { execFile } = require('child_process');
           // Try gnome-sushi (GNOME Quick Look), fall back to xdg-open
-          execFile('gnome-sushi', [filePath], (err) => {
+          execFile('gnome-sushi', [hostPath], (err) => {
             if (err) {
-              execFile('xdg-open', [filePath], () => {});
+              execFile('xdg-open', [hostPath], () => {});
             }
           });
           return Promise.resolve(true);
@@ -447,8 +465,19 @@ class SwiftAddonStub extends EventEmitter {
           trace('Failed to create sessions dir: ' + e.message);
         }
 
+        // Translate sharedCwdPath if it's a VM path
+        let hostCwdPath = sharedCwdPath;
+        if (typeof sharedCwdPath === 'string' && sharedCwdPath.startsWith('/sessions/')) {
+          const sessionPath = sharedCwdPath.substring('/sessions/'.length);
+          if (!sessionPath.includes('..') && isPathSafe(SESSIONS_BASE, sessionPath)) {
+            hostCwdPath = path.join(SESSIONS_BASE, sessionPath);
+            trace('Translated sharedCwdPath: ' + sharedCwdPath + ' -> ' + hostCwdPath);
+          }
+        }
+        trace('vm.spawn() sharedCwdPath=' + sharedCwdPath + ' hostCwdPath=' + hostCwdPath);
+
         console.log('[claude-swift] vm.spawn() id=' + id + ' cmd=' + hostCommand);
-        return self.spawn(id, processName, hostCommand, hostArgs, options, envVars, additionalMounts, isResume, allowedDomains, sharedCwdPath);
+        return self.spawn(id, processName, hostCommand, hostArgs, options, envVars, additionalMounts, isResume, allowedDomains, hostCwdPath);
       },
 
       kill: (id, signal) => {
@@ -479,6 +508,96 @@ class SwiftAddonStub extends EventEmitter {
       sendCommand: (cmd) => {
         console.log('[claude-swift] vm.sendCommand()', cmd);
         return Promise.resolve({});
+      },
+
+      /**
+       * Read file from VM filesystem
+       * The app calls this as readFile(sessionName, fullVmPath)
+       * Returns base64-encoded content
+       */
+      readFile: async (sessionName, vmPath) => {
+        trace('vm.readFile() sessionName=' + sessionName + ' vmPath=' + vmPath);
+
+        // Translate VM path to host path
+        let hostPath = vmPath;
+        if (typeof vmPath === 'string' && vmPath.startsWith('/sessions/')) {
+          const sessionPath = vmPath.substring('/sessions/'.length);
+          if (sessionPath.includes('..') || !isPathSafe(SESSIONS_BASE, sessionPath)) {
+            trace('SECURITY: Path traversal blocked in readFile: ' + vmPath);
+            throw new Error('Invalid path');
+          }
+          hostPath = path.join(SESSIONS_BASE, sessionPath);
+        }
+
+        trace('vm.readFile() translated to: ' + hostPath);
+
+        try {
+          const content = fs.readFileSync(hostPath);
+          // Return base64-encoded content as the app expects
+          return content.toString('base64');
+        } catch (e) {
+          trace('vm.readFile() error: ' + e.message);
+          throw e;
+        }
+      },
+
+      /**
+       * Write file to VM filesystem
+       * The app calls this as writeFile(sessionName, fullVmPath, base64Content)
+       * Content is base64-encoded
+       */
+      writeFile: async (sessionName, vmPath, base64Content) => {
+        trace('vm.writeFile() sessionName=' + sessionName + ' vmPath=' + vmPath);
+
+        // Translate VM path to host path
+        let hostPath = vmPath;
+        if (typeof vmPath === 'string' && vmPath.startsWith('/sessions/')) {
+          const sessionPath = vmPath.substring('/sessions/'.length);
+          if (sessionPath.includes('..') || !isPathSafe(SESSIONS_BASE, sessionPath)) {
+            trace('SECURITY: Path traversal blocked in writeFile: ' + vmPath);
+            throw new Error('Invalid path');
+          }
+          hostPath = path.join(SESSIONS_BASE, sessionPath);
+        }
+
+        trace('vm.writeFile() translated to: ' + hostPath);
+
+        try {
+          // Ensure parent directory exists
+          const dir = path.dirname(hostPath);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          }
+
+          // Decode base64 and write
+          const content = Buffer.from(base64Content, 'base64');
+          fs.writeFileSync(hostPath, content, { mode: 0o600 });
+          return true;
+        } catch (e) {
+          trace('vm.writeFile() error: ' + e.message);
+          throw e;
+        }
+      },
+
+      /**
+       * Check if debug logging is enabled
+       */
+      isDebugLoggingEnabled: () => {
+        return process.env.CLAUDE_COWORK_DEBUG === '1';
+      },
+
+      /**
+       * Stop the VM
+       */
+      stopVM: async () => {
+        console.log('[claude-swift] vm.stopVM()');
+        for (const entry of self._processes) {
+          try { entry[1].kill('SIGTERM'); } catch (e) {}
+        }
+        self._processes.clear();
+        self._guestConnected = false;
+        self._emit('guestConnectionChanged', { connected: false });
+        return { success: true };
       }
     };
 
@@ -625,7 +744,17 @@ class SwiftAddonStub extends EventEmitter {
   writeToProcess(id, data) {
     console.log('[claude-swift] writeToProcess(' + id + ')');
     const proc = this._processes.get(id);
-    if (proc && proc.stdin) proc.stdin.write(data);
+    if (proc && proc.stdin) {
+      // Translate /sessions/... paths to host paths in stdin data
+      let translatedData = data;
+      if (typeof data === 'string' && data.includes('/sessions/')) {
+        translatedData = data.replace(/\/sessions\//g, SESSIONS_BASE + '/');
+        if (TRACE_IO) {
+          trace('writeToProcess: translated /sessions/ paths in stdin');
+        }
+      }
+      proc.stdin.write(translatedData);
+    }
   }
 
   _emit(eventName, payload) {
