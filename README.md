@@ -18,7 +18,7 @@
 
 ---
 
-## ![](.github/assets/icons/info-32x32.png) Overview
+## ![](.github/assets/icons/info-24x24.png) Overview
 
 Claude Cowork is a special Claude Desktop build that works inside a folder you point it at—it reads, writes, and organizes files there while it runs a plan. Cowork is currently a **macOS-only preview** backed by a sandboxed Linux VM; this repo reverse-engineers and stubs the macOS-native pieces so Cowork can run directly on Linux (x86_64 + X11)—no VM and no macOS required. The stub translates VM paths to host paths so Cowork points at the right files on Linux.
 
@@ -26,14 +26,14 @@ Claude Cowork is a special Claude Desktop build that works inside a folder you p
 
 | Step | Description |
 |:-----|:------------|
-| ![](.github/assets/icons/script.png) **Stubbing** | Replace macOS-only native modules (`@ant/claude-swift`, `@ant/claude-native`) with JavaScript |
-| ![](.github/assets/icons/console.png) **Direct Execution** | Run the Claude Code binary directly (no VM needed—we're already on Linux!) |
-| ![](.github/assets/icons/folder.png) **Path Translation** | Convert VM paths to host paths transparently |
-| ![](.github/assets/icons/lock.png) **Platform Spoofing** | Send macOS headers so the server enables the feature |
+| ![](.github/assets/icons/script-24x24.png) **Stubbing** | Replace macOS-only native modules (`@ant/claude-swift`, `@ant/claude-native`) with JavaScript |
+| ![](.github/assets/icons/console-24x24.png) **Direct Execution** | Run the Claude Code binary directly (no VM needed—we're already on Linux!) |
+| ![](.github/assets/icons/folder-24x24.png) **Path Translation** | Convert VM paths to host paths transparently |
+| ![](.github/assets/icons/lock-24x24.png) **Platform Spoofing** | Send macOS headers so the server enables the feature |
 
 ---
 
-## ![](.github/assets/icons/alert.png) Status
+## ![](.github/assets/icons/alert-24x24.png) Status
 
 - **Unofficial research preview**: This is reverse-engineered and may break when Claude Desktop updates.
 - **Linux support**: Currently targets **Linux x86_64 + X11** (Wayland support is not implemented).
@@ -41,7 +41,7 @@ Claude Cowork is a special Claude Desktop build that works inside a folder you p
 
 ---
 
-## ![](.github/assets/icons/checkbox.png) Requirements
+## ![](.github/assets/icons/checkbox-24x24.png) Requirements
 
 - **Linux x86_64** (tested on Arch Linux, kernel 6.17.9)
 - **Node.js / npm** (for Electron)
@@ -52,7 +52,7 @@ Claude Cowork is a special Claude Desktop build that works inside a folder you p
 
 ---
 
-## ![](.github/assets/icons/rocket.png) Quick Start
+## ![](.github/assets/icons/rocket-24x24.png) Quick Start
 
 ```bash
 # 1. Clone the repo
@@ -79,7 +79,7 @@ The installer will:
 
 ---
 
-## ![](.github/assets/icons/settings.png) Architecture
+## ![](.github/assets/icons/settings-24x24.png) Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -184,7 +184,7 @@ The binary is a Bun-compiled executable at:
 
 ---
 
-## ![](.github/assets/icons/folder.png) Project Structure
+## ![](.github/assets/icons/folder-24x24.png) Project Structure
 
 ```
 claude-cowork-linux/
@@ -205,7 +205,7 @@ After running `install.sh`, the `app/` directory will contain the extracted Clau
 
 ---
 
-## ![](.github/assets/icons/console.png) Manual Setup
+## ![](.github/assets/icons/console-24x24.png) Manual Setup
 
 If the automated installer doesn't work, follow these steps:
 
@@ -339,7 +339,7 @@ Ensure the stub has methods on the `this.vm` object, not just the class.
 
 ---
 
-## ![](.github/assets/icons/console.png) Development
+## ![](.github/assets/icons/console-24x24.png) Development
 
 ### Enable Debug Logging
 
@@ -373,7 +373,7 @@ The stub writes to `~/.local/share/claude-cowork/logs/claude-swift-trace.log`:
 
 ---
 
-## ![](.github/assets/icons/shield-security-protection-16x16.png) Security
+## ![](.github/assets/icons/shield-security-protection-24x24.png) Security
 
 This project includes security hardening:
 
