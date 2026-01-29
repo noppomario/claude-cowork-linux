@@ -26,14 +26,25 @@ package-lock.json
 AGENT_HANDOFF.md
 ARCHITECTURE_MAP.md
 COMPLETE_SYSTEM_MAP.md
+CORPUS_ARCHITECTURE.md
 DEBUG_FINDINGS.md
 FILESYSTEM_MAP.md
 FINAL_REPORT.md
 HANDOFF.md
+HANDOFF_*.md
 INSTALLATION_REPORT.md
 SECURITY_ANALYSIS.md
 SECURITY_FIXES.md
 TEST_RESULTS.md
+
+# AUR package (separate git repo)
+/aur/
+
+# Build artifacts
+*.exe
+*.nupkg
+pkg/
+src/
 
 # Debug scripts (not needed for users)
 analyze-logs.sh
