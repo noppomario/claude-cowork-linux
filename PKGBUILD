@@ -69,25 +69,33 @@ build() {
         return 1
     fi
 
-    # Extract app.asar
-    "$_asar" extract "$_app_asar" app-extracted
+    # Extract app.asar (we run from extracted dir, not repacked asar)
+    "$_asar" extract "$_app_asar" linux-app-extracted
 
     # Apply Linux stubs (replaces Windows/macOS native bindings)
-    mkdir -p "app-extracted/node_modules/@ant/claude-swift/js"
+    mkdir -p "linux-app-extracted/node_modules/@ant/claude-swift/js"
     cp -f "${srcdir}/claude-cowork-linux/stubs/@ant/claude-swift/js/index.js" \
-          "app-extracted/node_modules/@ant/claude-swift/js/index.js"
+          "linux-app-extracted/node_modules/@ant/claude-swift/js/index.js"
     cp -f "${srcdir}/claude-cowork-linux/stubs/@ant/claude-native/index.js" \
-          "app-extracted/node_modules/@ant/claude-native/index.js"
+          "linux-app-extracted/node_modules/@ant/claude-native/index.js"
 
-    # Repack asar
-    "$_asar" pack app-extracted app.asar
+    # Copy frame-fix wrapper files into extracted app
+    cp -f "${srcdir}/claude-cowork-linux/stubs/frame-fix/frame-fix-entry.js" \
+          "linux-app-extracted/frame-fix-entry.js"
+    cp -f "${srcdir}/claude-cowork-linux/stubs/frame-fix/frame-fix-wrapper.js" \
+          "linux-app-extracted/frame-fix-wrapper.js"
 }
 
 package() {
     cd "${srcdir}"
 
-    # Install app.asar
-    install -Dm644 app.asar "${pkgdir}/usr/lib/claude-cowork/app.asar"
+    # Install extracted app directory
+    install -dm755 "${pkgdir}/usr/lib/claude-cowork"
+    cp -r linux-app-extracted "${pkgdir}/usr/lib/claude-cowork/"
+
+    # Install linux-loader.js (critical wrapper for platform spoofing and fixes)
+    install -Dm644 "${srcdir}/claude-cowork-linux/linux-loader.js" \
+                   "${pkgdir}/usr/lib/claude-cowork/linux-loader.js"
 
     # Install launcher script
     install -Dm755 /dev/stdin "${pkgdir}/usr/bin/claude-cowork" <<'EOF'
@@ -99,7 +107,8 @@ if [[ -n "$WAYLAND_DISPLAY" ]] || [[ "$XDG_SESSION_TYPE" == "wayland" ]]; then
     export ELECTRON_OZONE_PLATFORM_HINT=wayland
 fi
 
-exec electron /usr/lib/claude-cowork/app.asar --no-sandbox "$@"
+cd /usr/lib/claude-cowork
+exec electron linux-loader.js --no-sandbox "$@"
 EOF
 
     # Install desktop entry
