@@ -326,12 +326,60 @@ const vm = createEmitterObject('vm', {
       vm._processes = vm._processes || new Map();
       vm._processes.set(id, proc);
 
+      // Initialize process state for handshake simulation
+      // The macOS VM has a proper guest connection handshake; we simulate it by
+      // waiting for first stdout (proves process is alive and reading)
+      vm._processState = vm._processState || new Map();
+      vm._processState.set(id, {
+        ready: false,
+        writeQueue: [],  // Queue writes until process is ready
+      });
+
       // Create cleanup function to remove all listeners
+      // NOTE: We keep stdin error listener to catch late EPIPE from writes-in-flight
       const cleanup = () => {
         vm._processes?.delete(id);
+        vm._processState?.delete(id);
         if (proc.stdout) proc.stdout.removeAllListeners();
         if (proc.stderr) proc.stderr.removeAllListeners();
+        // Don't remove stdin listeners - keep error handler for late EPIPE
         proc.removeAllListeners();
+      };
+
+      // Function to flush queued writes once process is ready
+      const flushWriteQueue = () => {
+        const state = vm._processState?.get(id);
+        if (!state || !state.writeQueue.length) return;
+
+        trace('vm', 'flushing write queue', { id, count: state.writeQueue.length });
+
+        while (state.writeQueue.length > 0) {
+          const { data, resolve } = state.writeQueue.shift();
+          if (proc.stdin && !proc.stdin.destroyed) {
+            try {
+              proc.stdin.write(data);
+              resolve(true);
+            } catch (err) {
+              trace('vm', 'queued write error', { id, error: err.message });
+              resolve(false);
+            }
+          } else {
+            resolve(false);
+          }
+        }
+      };
+
+      // Mark process as ready (called on first stdout)
+      const markReady = () => {
+        const state = vm._processState?.get(id);
+        if (state && !state.ready) {
+          state.ready = true;
+          trace('vm', 'process ready (first stdout received)', { id });
+          // Emit guestConnectionChanged to match native behavior
+          vm.emit('guestConnectionChanged', { connected: true, processId: id });
+          // Flush any queued writes
+          flushWriteQueue();
+        }
       };
 
       // Buffer stdout to reduce callback frequency (helps prevent renderer overload)
@@ -341,6 +389,9 @@ const vm = createEmitterObject('vm', {
 
       if (proc.stdout) {
         proc.stdout.on('data', (data) => {
+          // First stdout = process is ready (handshake complete)
+          markReady();
+
           stdoutBuffer += data.toString('utf-8');
           if (!stdoutTimer) {
             stdoutTimer = setTimeout(() => {
@@ -354,12 +405,27 @@ const vm = createEmitterObject('vm', {
           }
         });
       }
+
       if (proc.stderr) {
         proc.stderr.on('data', (data) => {
+          // stderr also indicates process is alive
+          markReady();
           trace('vm', 'stderr', { id, len: data.length });
           if (vm._onStderr) vm._onStderr(id, data.toString('utf-8'));
         });
       }
+
+      // CRITICAL: Add stdin error handler to catch EPIPE
+      if (proc.stdin) {
+        proc.stdin.on('error', (err) => {
+          trace('vm', 'stdin error', { id, code: err.code, msg: err.message });
+          // EPIPE is expected when process exits - don't treat as fatal
+          if (err.code !== 'EPIPE') {
+            if (vm._onError) vm._onError(id, `stdin error: ${err.message}`, err.stack);
+          }
+        });
+      }
+
       proc.on('exit', (code, signal) => {
         cleanup();
         if (vm._onExit) vm._onExit(id, code || 0, signal || '');
@@ -388,14 +454,31 @@ const vm = createEmitterObject('vm', {
       }
       // Cleanup will happen in exit handler, but delete from map immediately
       vm._processes.delete(id);
+      vm._processState?.delete(id);
     }
   },
 
   writeStdin: async (id, data) => {
     trace('vm', 'writeStdin()', { id, dataLen: data?.length });
     const proc = vm._processes?.get(id);
-    if (proc && proc.stdin && !proc.stdin.destroyed) {
+    const state = vm._processState?.get(id);
+
+    if (!proc || !proc.stdin || proc.stdin.destroyed) {
+      trace('vm', 'writeStdin failed - no process or stdin', { id });
+      return Promise.resolve(false);
+    }
+
+    // If process not ready yet, queue the write (handshake simulation)
+    if (state && !state.ready) {
+      trace('vm', 'writeStdin queued (waiting for process ready)', { id, dataLen: data?.length, queueLen: state.writeQueue.length });
       return new Promise((resolve) => {
+        state.writeQueue.push({ data, resolve });
+      });
+    }
+
+    // Process is ready, write directly
+    return new Promise((resolve) => {
+      try {
         // Check if write buffer has space (backpressure handling)
         const canWrite = proc.stdin.write(data);
         if (!canWrite) {
@@ -408,10 +491,11 @@ const vm = createEmitterObject('vm', {
         } else {
           resolve(true);
         }
-      });
-    }
-    trace('vm', 'writeStdin failed - no process or stdin', { id });
-    return Promise.resolve(false);
+      } catch (err) {
+        trace('vm', 'writeStdin error', { id, error: err.message });
+        resolve(false);
+      }
+    });
   },
 
   readFile: async (sessionName, vmPath) => {
