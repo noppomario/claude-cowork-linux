@@ -2,49 +2,73 @@
 """
 Patch Claude Desktop to enable Cowork (yukonSilver) on Linux.
 
-The bundled app checks process.platform === 'darwin' in the wj() function.
-This patch makes wj() unconditionally return {status:"supported"}.
+Finds all functions that gate features behind process.platform !== "darwin"
+and patches them to unconditionally return {status:"supported"}.
 
 Usage:
     python3 patches/enable-cowork.py <path-to-index.js>
-
-Example:
-    python3 patches/enable-cowork.py squashfs-root/usr/lib/node_modules/electron/dist/resources/app/.vite/build/index.js
 """
 
 import sys
 import re
 
-OLD_PATTERN = 'function wj(){return process.platform!=="darwin"?{status:"unsupported",reason:"Darwin only"}:process.arch!=="arm64"?{status:"unsupported",reason:"arm64 only"}:gj().major<14?{status:"unsupported",reason:"minimum macOS version not met"}:{status:"supported"}}'
 
-NEW_CODE = 'function wj(){return{status:"supported"}}'
+def find_balanced_function(content, start):
+    """Find a function body with balanced braces starting at `start`."""
+    depth = 0
+    for i in range(start, len(content)):
+        if content[i] == '{':
+            depth += 1
+        elif content[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return content[start:i + 1]
+    return None
+
 
 def patch_file(filepath):
     with open(filepath, 'r') as f:
         content = f.read()
 
-    if NEW_CODE in content:
-        print(f"Already patched: {filepath}")
-        return True
+    # Find all functions: function <name>(){return process.platform!=="darwin"?{status:"un...
+    pattern = re.compile(
+        r'function\s+(\w+)\(\)\{return\s+process\.platform!=="darwin"\?\{status:"(?:unsupported|unavailable)"'
+    )
 
-    if OLD_PATTERN not in content:
-        # Try to find wj function with regex for diagnostics
-        match = re.search(r'function wj\(\)\{[^}]+\}', content)
-        if match:
-            print(f"ERROR: wj() found but pattern differs:")
-            print(f"  Found: {match.group()[:100]}...")
-        else:
-            print(f"ERROR: wj() function not found in {filepath}")
+    patches = []
+    for match in pattern.finditer(content):
+        func_name = match.group(1)
+        func_body = find_balanced_function(content, match.start())
+        if func_body:
+            replacement = f'function {func_name}(){{return{{status:"supported"}}}}'
+            patches.append((func_body, replacement, func_name))
+
+    if not patches:
+        print(f"ERROR: No platform-gated functions found in {filepath}")
         return False
 
-    content = content.replace(OLD_PATTERN, NEW_CODE)
+    for old, new, name in patches:
+        if new in content:
+            print(f"  {name}(): already patched")
+            continue
+        content = content.replace(old, new)
+        print(f"  {name}(): patched -> {{status:\"supported\"}}")
+
+    # Remove titleBarStyle:"hidden" — Electron's BrowserWindow property is
+    # read-only so we cannot wrap the constructor. Instead, strip the option
+    # from the bundle so windows use the default native frame on Linux.
+    # Quick Entry windows also lose this but keep frame:!1 so stay frameless.
+    count = content.count('titleBarStyle:"hidden",')
+    if count:
+        content = content.replace('titleBarStyle:"hidden",', '')
+        print(f"  Removed {count} titleBarStyle:\"hidden\" (Linux native frame)")
 
     with open(filepath, 'w') as f:
         f.write(content)
 
-    print(f"SUCCESS: Patched {filepath}")
-    print(f"  wj() now returns {{status:\"supported\"}} unconditionally")
+    print(f"SUCCESS: Patched {len(patches)} function(s) in {filepath}")
     return True
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

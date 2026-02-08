@@ -19,6 +19,12 @@
 set -euo pipefail
 
 # ============================================================
+# Local repo detection (for running from cloned repo)
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ============================================================
 # Configuration
 # ============================================================
 
@@ -325,7 +331,7 @@ extract_app() {
     local dmg_path="$1"
     local extract_dir="$2"
 
-    log_info "Extracting DMG..."
+    log_info "Extracting DMG..." >&2
     7z x -y -o"$extract_dir" "$dmg_path" >/dev/null 2>&1 || die "Failed to extract DMG"
 
     # Find Claude.app
@@ -335,7 +341,7 @@ extract_app() {
         die "Claude.app not found in DMG"
     fi
 
-    log_success "Extracted Claude.app"
+    log_success "Extracted Claude.app" >&2
     echo "$claude_app"
 }
 
@@ -360,15 +366,27 @@ extract_asar() {
 download_swift_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-    curl -fsSL "$SWIFT_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Swift stub"
-    log_success "Downloaded Swift stub"
+    local local_stub="$SCRIPT_DIR/stubs/@ant/claude-swift/js/index.js"
+    if [[ -f "$local_stub" ]]; then
+        cp "$local_stub" "$stub_dir/index.js" || die "Failed to copy local Swift stub"
+        log_success "Copied Swift stub from local repo"
+    else
+        curl -fsSL "$SWIFT_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Swift stub"
+        log_success "Downloaded Swift stub"
+    fi
 }
 
 download_native_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-    curl -fsSL "$NATIVE_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Native stub"
-    log_success "Downloaded Native stub"
+    local local_stub="$SCRIPT_DIR/stubs/@ant/claude-native/index.js"
+    if [[ -f "$local_stub" ]]; then
+        cp "$local_stub" "$stub_dir/index.js" || die "Failed to copy local Native stub"
+        log_success "Copied Native stub from local repo"
+    else
+        curl -fsSL "$NATIVE_STUB_URL" -o "$stub_dir/index.js" || die "Failed to download Native stub"
+        log_success "Downloaded Native stub"
+    fi
 }
 
 # ============================================================
@@ -377,137 +395,15 @@ download_native_stub() {
 
 create_linux_loader() {
     local resources_dir="$1"
+    local local_loader="$SCRIPT_DIR/linux-loader.js"
 
-    cat > "$resources_dir/linux-loader.js" << 'LOADER'
-#!/usr/bin/env node
-/**
- * linux-loader.js - Claude Linux compatibility layer
- */
-
-const Module = require('module');
-const path = require('path');
-const fs = require('fs');
-
-console.log('Claude Linux Loader');
-
-const REAL_PLATFORM = process.platform;
-const REAL_ARCH = process.arch;
-const RESOURCES_DIR = __dirname;
-const STUB_PATH = path.join(RESOURCES_DIR, 'stubs', '@ant', 'claude-swift', 'js', 'index.js');
-
-let appStarted = false;
-
-Object.defineProperty(process, 'platform', {
-  get() { return appStarted ? 'darwin' : REAL_PLATFORM; },
-  configurable: true
-});
-
-Object.defineProperty(process, 'arch', {
-  get() {
-    const stack = new Error().stack || '';
-    if (stack.includes('internal/') || stack.includes('node:')) return REAL_ARCH;
-    if (stack.includes('/app/') || stack.includes('Claude.app') || stack.includes('.vite/build')) return 'arm64';
-    return REAL_ARCH;
-  },
-  configurable: true
-});
-
-const originalGetSystemVersion = process.getSystemVersion;
-process.getSystemVersion = function() {
-  const stack = new Error().stack || '';
-  if (stack.includes('/app/') || stack.includes('Claude.app') || stack.includes('.vite/build')) return '14.0.0';
-  return originalGetSystemVersion ? originalGetSystemVersion.call(process) : '0.0.0';
-};
-
-const originalLoad = Module._load;
-let swiftStubCache = null;
-let loadingStub = false;
-let patchedElectron = null;
-
-function loadSwiftStub() {
-  if (swiftStubCache) return swiftStubCache;
-  if (!fs.existsSync(STUB_PATH)) throw new Error(`Swift stub not found: ${STUB_PATH}`);
-  loadingStub = true;
-  try {
-    delete require.cache[STUB_PATH];
-    swiftStubCache = originalLoad.call(Module, STUB_PATH, module, false);
-  } finally { loadingStub = false; }
-  return swiftStubCache;
-}
-
-Module._load = function(request, parent, isMain) {
-  if (loadingStub) return originalLoad.apply(this, arguments);
-  if (request.includes('swift_addon') && request.endsWith('.node')) return loadSwiftStub();
-  if (request === 'electron' && patchedElectron) return patchedElectron;
-  return originalLoad.apply(this, arguments);
-};
-
-const electron = require('electron');
-
-const origSysPrefs = electron.systemPreferences || {};
-const patchedSysPrefs = {
-  getMediaAccessStatus: () => 'granted', askForMediaAccess: async () => true,
-  getEffectiveAppearance: () => 'light', getAppearance: () => 'light', setAppearance: () => {},
-  getAccentColor: () => '007AFF', getColor: () => '#007AFF',
-  getUserDefault: () => null, setUserDefault: () => {}, removeUserDefault: () => {},
-  subscribeNotification: () => 0, unsubscribeNotification: () => {},
-  subscribeWorkspaceNotification: () => 0, unsubscribeWorkspaceNotification: () => {},
-  postNotification: () => {}, postLocalNotification: () => {},
-  isTrustedAccessibilityClient: () => true, isSwipeTrackingFromScrollEventsEnabled: () => false,
-  isAeroGlassEnabled: () => false, isHighContrastColorScheme: () => false,
-  isReducedMotion: () => false, isInvertedColorScheme: () => false,
-};
-for (const [key, val] of Object.entries(patchedSysPrefs)) origSysPrefs[key] = val;
-
-const OrigBrowserWindow = electron.BrowserWindow;
-const macOSWindowMethods = {
-  setWindowButtonPosition: () => {}, getWindowButtonPosition: () => ({ x: 0, y: 0 }),
-  setTrafficLightPosition: () => {}, getTrafficLightPosition: () => ({ x: 0, y: 0 }),
-  setWindowButtonVisibility: () => {}, setVibrancy: () => {}, setBackgroundMaterial: () => {},
-  setRepresentedFilename: () => {}, getRepresentedFilename: () => '',
-  setDocumentEdited: () => {}, isDocumentEdited: () => false,
-  setTouchBar: () => {}, setSheetOffset: () => {}, setAutoHideCursor: () => {},
-};
-for (const [method, impl] of Object.entries(macOSWindowMethods)) {
-  if (typeof OrigBrowserWindow.prototype[method] !== 'function') OrigBrowserWindow.prototype[method] = impl;
-}
-
-const OrigMenu = electron.Menu;
-const origSetApplicationMenu = OrigMenu.setApplicationMenu;
-OrigMenu.setApplicationMenu = function(menu) {
-  try { if (origSetApplicationMenu) return origSetApplicationMenu.call(OrigMenu, menu); } catch (e) {}
-};
-
-const origBuildFromTemplate = OrigMenu.buildFromTemplate;
-OrigMenu.buildFromTemplate = function(template) {
-  const filtered = (template || []).map(item => {
-    if (!item) return null;
-    const f = { ...item };
-    if (f.role === 'services' || f.role === 'recentDocuments') return null;
-    if (f.submenu && Array.isArray(f.submenu)) {
-      f.submenu = f.submenu.filter(s => s && s.role !== 'services' && s.role !== 'recentDocuments');
-    }
-    return f;
-  }).filter(Boolean);
-  return origBuildFromTemplate.call(OrigMenu, filtered);
-};
-
-patchedElectron = electron;
-
-process.on('uncaughtException', (error) => {
-  if (error.message && (error.message.includes('is not a function') || error.message.includes('No handler registered'))) {
-    console.error('[Error]', error.message);
-    return;
-  }
-  throw error;
-});
-
-appStarted = true;
-require('./app/.vite/build/index.js');
-LOADER
-
-    chmod +x "$resources_dir/linux-loader.js"
-    log_success "Created Linux loader"
+    if [[ -f "$local_loader" ]]; then
+        sudo cp "$local_loader" "$resources_dir/linux-loader.js"
+        sudo chmod +x "$resources_dir/linux-loader.js"
+        log_success "Copied Linux loader from local repo"
+    else
+        die "linux-loader.js not found at $local_loader"
+    fi
 }
 
 # ============================================================
@@ -517,7 +413,7 @@ LOADER
 create_launcher() {
     local macos_dir="$1"
 
-    cat > "$macos_dir/Claude" << 'LAUNCHER'
+    sudo tee "$macos_dir/Claude" > /dev/null << 'LAUNCHER'
 #!/bin/bash
 # Claude launcher script
 
@@ -544,6 +440,11 @@ done
 
 export ELECTRON_ENABLE_LOGGING=1
 
+# Add mise shims to PATH (for mise-managed electron/node)
+if [[ -d "$HOME/.local/share/mise/shims" ]]; then
+  export PATH="$HOME/.local/share/mise/shims:$PATH"
+fi
+
 # Wayland support for Hyprland, Sway, and other Wayland compositors
 if [[ -n "$WAYLAND_DISPLAY" ]] || [[ "$XDG_SESSION_TYPE" == "wayland" ]]; then
   export ELECTRON_OZONE_PLATFORM_HINT=wayland
@@ -553,7 +454,7 @@ fi
 exec electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | tee -a ~/Library/Logs/Claude/startup.log
 LAUNCHER
 
-    chmod +x "$macos_dir/Claude"
+    sudo chmod +x "$macos_dir/Claude"
     log_success "Created launcher script"
 }
 
@@ -612,18 +513,98 @@ install_app() {
     sudo cp "$WORK_DIR/stubs/swift/index.js" "$stub_swift_dir/index.js"
     sudo cp "$WORK_DIR/stubs/native/index.js" "$stub_native_dir/index.js"
 
-    # Replace original @ant modules with stubs
-    sudo cp "$WORK_DIR/stubs/swift/index.js" "$INSTALL_DIR/Contents/Resources/app/node_modules/@ant/claude-swift/js/index.js"
-    sudo cp "$WORK_DIR/stubs/native/index.js" "$INSTALL_DIR/Contents/Resources/app/node_modules/@ant/claude-native/index.js"
+    # Replace original modules with stubs (detect actual module paths)
+    local app_modules="$INSTALL_DIR/Contents/Resources/app/node_modules"
+    local swift_targets=("$app_modules/@ant/claude-swift/js" "$app_modules/@anthropic-ai/claude-swift/js")
+    local native_targets=("$app_modules/@ant/claude-native" "$app_modules/claude-native")
+
+    for target in "${swift_targets[@]}"; do
+        if [[ -d "$target" ]]; then
+            sudo cp "$WORK_DIR/stubs/swift/index.js" "$target/index.js"
+            log_success "Replaced swift stub in $target"
+        fi
+    done
+
+    for target in "${native_targets[@]}"; do
+        if [[ -d "$target" ]]; then
+            sudo cp "$WORK_DIR/stubs/native/index.js" "$target/index.js"
+            log_success "Replaced native stub in $target"
+        fi
+    done
 
     # Create Linux loader
     create_linux_loader "$INSTALL_DIR/Contents/Resources"
+
+    # Patch EIPC UUID in linux-loader.js to match the app bundle
+    local loader_js="$INSTALL_DIR/Contents/Resources/linux-loader.js"
+    local bundle_index="$INSTALL_DIR/Contents/Resources/app/.vite/build/index.js"
+    if [[ -f "$loader_js" ]] && [[ -f "$bundle_index" ]]; then
+        local bundle_uuid
+        bundle_uuid=$(grep -oP '\$eipc_message\$_\K[a-f0-9-]{36}' "$bundle_index" | head -1 || true)
+        if [[ -n "$bundle_uuid" ]]; then
+            sudo sed -i "s/c42e5915-d1f8-48a1-a373-fe793971fdbd/$bundle_uuid/g" "$loader_js"
+            log_success "Patched EIPC UUID to $bundle_uuid"
+        else
+            log_warn "Could not extract EIPC UUID from bundle"
+        fi
+    fi
+
+    # Disable EIPC origin validation for file:// URLs
+    # The app's EIPC handlers validate senderFrame.parent === null, which fails
+    # for our file:// renderer pages. Multiple minified copies exist with
+    # different function names (e.g. ki, _C), so use a general regex.
+    if [[ -f "$bundle_index" ]]; then
+        local val_count
+        val_count=$(grep -cP 'function \w+\(t\)\{var e;return\(\(e=t\.senderFrame\)==null\?void 0:e\.parent\)===null\}' "$bundle_index" || true)
+        if [[ "$val_count" -gt 0 ]]; then
+            sudo sed -i -E 's/function ([a-zA-Z_$][a-zA-Z0-9_$]*)\(t\)\{var e;return\(\(e=t\.senderFrame\)==null\?void 0:e\.parent\)===null\}/function \1(t){return true}/g' "$bundle_index"
+            log_success "Patched $val_count EIPC origin validation function(s)"
+        else
+            log_warn "No EIPC origin validation functions found (non-fatal)"
+        fi
+    fi
+
+    # Apply Cowork enablement patch
+    local cowork_patch="$SCRIPT_DIR/patches/enable-cowork.py"
+    local bundle_index="$INSTALL_DIR/Contents/Resources/app/.vite/build/index.js"
+    if [[ -f "$cowork_patch" ]] && [[ -f "$bundle_index" ]]; then
+        log_info "Applying Cowork enablement patch..."
+        sudo python3 "$cowork_patch" "$bundle_index" || log_warn "Cowork patch failed (non-fatal)"
+    fi
+
+    # Copy frame-fix files into app/ and symlink linux-app-extracted -> app
+    # linux-loader.js requires ./linux-app-extracted/frame-fix-entry.js
+    # frame-fix-entry.js requires ./.vite/build/index.js (relative to itself)
+    local app_dir="$INSTALL_DIR/Contents/Resources/app"
+    local local_frame_fix="$SCRIPT_DIR/stubs/frame-fix"
+    if [[ -d "$local_frame_fix" ]] && [[ -d "$app_dir" ]]; then
+        sudo cp "$local_frame_fix/frame-fix-entry.js" "$app_dir/frame-fix-entry.js"
+        sudo cp "$local_frame_fix/frame-fix-wrapper.js" "$app_dir/frame-fix-wrapper.js"
+        sudo ln -sfn app "$INSTALL_DIR/Contents/Resources/linux-app-extracted"
+        log_success "Copied frame-fix files and created linux-app-extracted symlink"
+    else
+        die "frame-fix stubs or app dir not found"
+    fi
+
+    # Symlink i18n locale files into app/resources/i18n/
+    # The app expects them at app/resources/i18n/*.json but asar extracts them to Resources/*.json
+    local i18n_dir="$INSTALL_DIR/Contents/Resources/app/resources/i18n"
+    sudo mkdir -p "$i18n_dir"
+    for f in "$INSTALL_DIR/Contents/Resources"/*.json; do
+        [[ -f "$f" ]] && sudo ln -sf "$f" "$i18n_dir/$(basename "$f")"
+    done
+    log_success "Linked i18n locale files"
+
+    # Symlink .vite/build/ into Resources/ for preload scripts
+    # Electron resolves preload paths relative to Resources/, not Resources/app/
+    sudo ln -sfn app/.vite "$INSTALL_DIR/Contents/Resources/.vite"
+    log_success "Linked .vite preload scripts"
 
     # Create launcher
     create_launcher "$INSTALL_DIR/Contents/MacOS"
 
     # Create symlink in PATH
-    sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude
+    sudo ln -sf "$INSTALL_DIR/Contents/MacOS/Claude" /usr/local/bin/claude-desktop
 
     log_success "Installed to $INSTALL_DIR"
 }
@@ -754,13 +735,13 @@ main() {
     echo -e "${GREEN} Installation Complete!${NC}"
     echo "=========================================="
     echo ""
-    echo "Launch Claude:"
-    echo "  Command:  claude"
+    echo "Launch Claude Desktop:"
+    echo "  Command:  claude-desktop"
     echo "  Desktop:  Search for 'Claude' in app launcher"
     echo ""
     echo "Options:"
-    echo "  claude --debug      Enable trace logging"
-    echo "  claude --devtools   Enable Chrome DevTools"
+    echo "  claude-desktop --debug      Enable trace logging"
+    echo "  claude-desktop --devtools   Enable Chrome DevTools"
     echo ""
     echo "Logs: ~/Library/Logs/Claude/startup.log"
     echo ""

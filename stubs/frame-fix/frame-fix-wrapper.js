@@ -103,14 +103,16 @@ console.log('[fs.rename] Patched to handle EXDEV errors');
 // 1. PLATFORM SPOOFING - Immediate, before any app code
 // ============================================================
 
-// Helper to check if call is from system/electron internals
+// Check only the DIRECT caller frame, not the entire stack chain.
+// Module loader frames (node:internal/modules) appear in every require() stack,
+// which would falsely return 'linux' for app code during module initialization.
 function isSystemCall(stack) {
-  return stack.includes('node:internal') ||
-         stack.includes('internal/modules') ||
-         stack.includes('node:electron') ||
-         stack.includes('electron/js2c') ||
-         stack.includes('electron.asar') ||
-         stack.includes('frame-fix-wrapper');
+  const caller = (stack.split('\n')[2] || '');
+  return caller.includes('node:') ||
+         caller.includes('electron/js2c') ||
+         caller.includes('electron.asar') ||
+         caller.includes('linux-loader.js') ||
+         caller.includes('frame-fix-wrapper');
 }
 
 Object.defineProperty(process, 'platform', {
@@ -189,26 +191,9 @@ global.getYukonSilverSupportStatus = function() {
   return 'supported';
 };
 
-// Try to intercept via prototype pollution on common patterns
-// The app might use an object like: vmStatus.getStatus() or vmSupport.getSupportStatus()
-const originalDefineProperty = Object.defineProperty;
-Object.defineProperty = function(target, key, descriptor) {
-  // Intercept any property that looks like it returns support status
-  if (typeof key === 'string' && (key.includes('SupportStatus') || key === 'status' || key === 'supported')) {
-    if (descriptor && typeof descriptor.value === 'function') {
-      const original = descriptor.value;
-      descriptor.value = function(...args) {
-        const result = original.apply(this, args);
-        if (result === 'unsupported') {
-          console.log(`[Cowork] Intercepted ${key} returning unsupported -> supported`);
-          return 'supported';
-        }
-        return result;
-      };
-    }
-  }
-  return originalDefineProperty.call(this, target, key, descriptor);
-};
+// NOTE: Object.defineProperty override removed - too aggressive and causes
+// side effects on unrelated code. The enable-cowork.py patch handles
+// platform-gated functions directly in the bundled JS.
 
 console.log('[Cowork] Linux support enabled - VM will be emulated');
 
@@ -263,8 +248,11 @@ Module.prototype.require = function(id) {
             if (method === 'getDownloadStatus') {
               return { status: 'ready', downloaded: true, installed: true, progress: 100 };
             }
-            if (method === 'isSupported' || method === 'getSupportStatus') {
-              return 'supported';
+            if (method === 'isSupported') {
+              return true;
+            }
+            if (method === 'getSupportStatus') {
+              return { status: 'supported' };
             }
 
             // Call original handler for other methods
