@@ -572,6 +572,16 @@ install_app() {
         sudo python3 "$cowork_patch" "$bundle_index" || log_warn "Cowork patch failed (non-fatal)"
     fi
 
+    # Inject Cowork IPC bridges into mainView.js preload
+    # Newer bundles removed ClaudeVM/YukonSilver bridges from the preload,
+    # so the web code cannot communicate Cowork state to the main process.
+    local bridge_patch="$SCRIPT_DIR/patches/inject-cowork-bridge.py"
+    local mainview_js="$INSTALL_DIR/Contents/Resources/app/.vite/build/mainView.js"
+    if [[ -f "$bridge_patch" ]] && [[ -f "$mainview_js" ]]; then
+        log_info "Injecting Cowork IPC bridges into preload..."
+        sudo python3 "$bridge_patch" "$mainview_js" || log_warn "Cowork bridge injection failed (non-fatal)"
+    fi
+
     # Copy frame-fix files into app/ and symlink linux-app-extracted -> app
     # linux-loader.js requires ./linux-app-extracted/frame-fix-entry.js
     # frame-fix-entry.js requires ./.vite/build/index.js (relative to itself)

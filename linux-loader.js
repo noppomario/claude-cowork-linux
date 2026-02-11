@@ -254,23 +254,51 @@ patchedElectron = electron;
 console.log('[Electron] Patched: systemPreferences, BrowserWindow.prototype, Menu');
 
 // ============================================================
-// 3.5. USER-AGENT SPOOFING
+// 3.5. APP VERSION FIX + USER-AGENT SPOOFING
 // ============================================================
+// Electron reads version from package.json relative to the main script.
+// Since linux-loader.js is in Resources/ (not Resources/app/), Electron
+// can't find app/package.json and returns "0.0". The bundle captures
+// app.getVersion() at init time for Anthropic-Client-Version headers.
+let correctVersion = '0.14.10';
+try {
+  const appPkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'app', 'package.json'), 'utf8'));
+  correctVersion = appPkg.version || '0.14.10';
+  app.getVersion = () => correctVersion;
+  console.log('[Version] Fixed:', correctVersion, '| app.name:', app.getName());
+} catch (e) {
+  console.warn('[Version] Failed to read app version, using fallback');
+  app.getVersion = () => correctVersion;
+}
+
+// User-Agent must contain "Claude/<version>" so the bundle's Spe() can replace
+// it with "ClaudeNest/<version>". The web code from claude.ai checks for
+// "ClaudeNest" in UA to determine desktop mode (vs web_claude_ai).
 if (app.userAgentFallback) {
   app.userAgentFallback = app.userAgentFallback
     .replace(/\(X11; Linux [^)]+\)/, '(Macintosh; Intel Mac OS X 10_15_7)')
     .replace(/Linux/, 'Mac OS X');
+  if (!app.userAgentFallback.includes('Claude/')) {
+    app.userAgentFallback = app.userAgentFallback.replace(
+      /Electron\/(\S+)/,
+      `Claude/${correctVersion} Electron/$1`
+    );
+  }
+  console.log('[UA] userAgentFallback:', app.userAgentFallback);
 }
 
 app.whenReady().then(() => {
   try {
     const s = session.defaultSession;
     if (s) {
-      s.setUserAgent(
-        s.getUserAgent()
-          .replace(/\(X11; Linux [^)]+\)/, '(Macintosh; Intel Mac OS X 10_15_7)')
-          .replace(/Linux/, 'Mac OS X')
-      );
+      let ua = s.getUserAgent()
+        .replace(/\(X11; Linux [^)]+\)/, '(Macintosh; Intel Mac OS X 10_15_7)')
+        .replace(/Linux/, 'Mac OS X');
+      if (!ua.includes('Claude/')) {
+        ua = ua.replace(/Electron\/(\S+)/, `Claude/${correctVersion} Electron/$1`);
+      }
+      s.setUserAgent(ua);
+      console.log('[UA] session UA:', ua.slice(0, 120));
     }
   } catch (e) {
     console.error('[UserAgent] Failed:', e.message);
@@ -296,11 +324,44 @@ function describeResult(r) {
   return `${typeof r}:${String(r).slice(0, 50)}`;
 }
 
+// --- ipcMain.removeHandler wrapper ---
+// Prevent the bundle from removing our pre-registered Cowork handlers.
+// The bundle's EIPC init calls removeHandler before re-registering, but
+// for getSupportedFeatures it only removes without re-registering, leaving
+// no handler at all.
+const origRemoveHandler = ipcMain.removeHandler.bind(ipcMain);
+const removeHandlerWrapper = function(channel) {
+  const name = shortChannelName(channel);
+  console.log(`[IPC] removeHandler called: ${name}`);
+  // Protect Cowork handlers that the bundle doesn't re-register.
+  // NOTE: getSupportedFeatures is NOT blocked - the bundle removes then re-registers
+  // its own handler with origin validation + Zod schema. The patched Fy/Yfe/Qfe
+  // functions (via enable-cowork.py) ensure it returns {status:"supported"}.
+  if (name.includes('ClaudeVM') ||
+      name.includes('getCoworkFeatureState') || name.includes('getYukonSilverStatus') ||
+      name.includes('getFeatureFlags') || name.includes('LocalAgentModeSessions')) {
+    console.log(`[IPC] BLOCKED removeHandler: ${name}`);
+    return;
+  }
+  return origRemoveHandler(channel);
+};
+ipcMain.removeHandler = removeHandlerWrapper;
+// Also patch prototype to catch calls via Object.getPrototypeOf(ipcMain)
+try {
+  const proto = Object.getPrototypeOf(ipcMain);
+  if (proto && typeof proto.removeHandler === 'function') {
+    proto.removeHandler = removeHandlerWrapper;
+  }
+} catch (e) { /* prototype patch failed, wrapper on instance should suffice */ }
+
 // --- ipcMain.handle wrapper ---
 const origHandle = ipcMain.handle.bind(ipcMain);
-ipcMain.handle = function(channel, handler) {
+const handleWrapper = function(channel, handler) {
+  const name = shortChannelName(channel);
+  if (name.includes('AppFeatures') || name.includes('ClaudeVM') || name.includes('LocalAgent')) {
+    console.log(`[IPC] handle() registering: ${name}`);
+  }
   const wrapped = async (event, ...args) => {
-    const name = shortChannelName(channel);
     try {
       const result = await handler(event, ...args);
       // Suppress noisy AutoUpdater logging
@@ -316,10 +377,20 @@ ipcMain.handle = function(channel, handler) {
   try {
     return origHandle(channel, wrapped);
   } catch (e) {
-    if (e.message && e.message.includes('already registered')) return;
+    if (e.message && e.message.includes('already registered')) {
+      console.log(`[IPC] handle() SKIPPED (already registered): ${name}`);
+      return;
+    }
     throw e;
   }
 };
+ipcMain.handle = handleWrapper;
+try {
+  const proto = Object.getPrototypeOf(ipcMain);
+  if (proto && typeof proto.handle === 'function') {
+    proto.handle = handleWrapper;
+  }
+} catch (e) { /* prototype patch failed */ }
 
 // --- ipcMain.on wrapper (sync IPC) ---
 const origOn = ipcMain.on.bind(ipcMain);
@@ -345,18 +416,48 @@ ipcMain.on = function(channel, handler) {
 // 5. IPC HANDLERS FOR COWORK/YUKONSILVER
 // ============================================================
 
-// Auto-detect EIPC UUID from the app bundle
+// Auto-detect EIPC UUID and getSupportedFeatures schema from the app bundle
 let EIPC_UUID = 'c42e5915-d1f8-48a1-a373-fe793971fdbd';
+let SUPPORTED_FEATURES_FIELDS = ['nativeQuickEntry', 'quickEntryDictation'];
 try {
   const bundleIndex = path.join(__dirname, 'app', '.vite', 'build', 'index.js');
-  const bundleHead = fs.readFileSync(bundleIndex, 'utf8').slice(0, 100000);
-  const m = bundleHead.match(/\$eipc_message\$_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
-  if (m) {
-    EIPC_UUID = m[1];
+  const bundleContent = fs.readFileSync(bundleIndex, 'utf8');
+
+  // Extract EIPC UUID (appears early in the bundle)
+  const uuidMatch = bundleContent.match(/\$eipc_message\$_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+  if (uuidMatch) {
+    EIPC_UUID = uuidMatch[1];
     console.log('[EIPC] UUID:', EIPC_UUID);
   }
+
+  // Extract getSupportedFeatures field names from the Zod schema.
+  // Chain: function fJ(t){return rJ.safeParse(t).success}
+  //     → ,rJ=Te({nativeQuickEntry:R4,quickEntryDictation:R4})
+  // Step 1: Find the validator function for getSupportedFeatures
+  const validatorMatch = bundleContent.match(/!(\w{2,3})\(i\)\)throw new Error\('Result from method "getSupportedFeatures"/);
+  if (validatorMatch) {
+    const validatorFn = validatorMatch[1]; // e.g. "fJ"
+    // Step 2: Find which schema var the validator uses
+    const schemaMatch = bundleContent.match(new RegExp(
+      `function ${validatorFn}\\(t\\)\\{return (\\w+)\\.safeParse`
+    ));
+    if (schemaMatch) {
+      const schemaVar = schemaMatch[1]; // e.g. "rJ"
+      // Step 3: Find the Zod schema definition: rJ=Te({field1:type,field2:type})
+      const defMatch = bundleContent.match(new RegExp(
+        `[,;]${schemaVar}=\\w+\\(\\{([\\w:,]+)\\}\\)`
+      ));
+      if (defMatch) {
+        const fields = defMatch[1].match(/(\w+):/g);
+        if (fields?.length > 0) {
+          SUPPORTED_FEATURES_FIELDS = fields.map(f => f.replace(':', ''));
+        }
+      }
+    }
+  }
+  console.log('[EIPC] Feature fields:', SUPPORTED_FEATURES_FIELDS.join(', '));
 } catch (e) {
-  console.warn('[EIPC] Bundle read failed, using fallback UUID');
+  console.warn('[EIPC] Bundle read failed, using fallback UUID/fields');
 }
 
 const EIPC_NAMESPACES = ['claude.web', 'claude.hybrid', 'claude.settings'];
@@ -385,11 +486,13 @@ function registerEipcHandler(handlerName, handler, isSync = false) {
 }
 
 // ----- AppFeatures -----
-registerEipcHandler('AppFeatures_$_getSupportedFeatures', async () => ({
-  localAgentMode: true, cowork: true, claudeCode: true, extensions: true,
-  mcp: true, globalShortcuts: true, menuBar: true, startupOnLogin: true,
-  autoUpdate: true, filePickers: true,
-}));
+registerEipcHandler('AppFeatures_$_getSupportedFeatures', async () => {
+  const result = {};
+  for (const field of SUPPORTED_FEATURES_FIELDS) {
+    result[field] = { status: 'supported' };
+  }
+  return result;
+});
 registerEipcHandler('AppFeatures_$_getCoworkFeatureState', async () => ({
   enabled: true, status: 'supported', reason: null,
 }));
@@ -473,34 +576,224 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ============================================================
-// 7. ANTHROPIC DESKTOP HEADERS
+// 7. ANTHROPIC DESKTOP HEADERS + DIAGNOSTICS
 // ============================================================
-// The bundle's Eyt() sets these via onBeforeSendHeaders, but Electron only
-// allows ONE listener. Our whenReady().then() runs after the bundle's sync
-// registration and overrides it. Set the headers ourselves.
+// The bundle registers its own onBeforeSendHeaders (Spe function) which
+// already sends correct Anthropic headers (our platform spoofing makes
+// process.platform return 'darwin'). We intercept the method so we can:
+//   a) Add any extra headers the bundle doesn't send
+//   b) Log API request headers for diagnostics
 
 app.whenReady().then(() => {
   try {
-    const appVersion = app.getVersion();
-    session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
-      const headers = details.requestHeaders;
-      try {
-        const url = new URL(details.url);
-        if (url.host === 'claude.ai' || url.host.endsWith('.claude.ai')) {
-          headers['anthropic-client-platform'] = 'desktop_app';
-          headers['anthropic-client-app'] = 'com.anthropic.claudefordesktop';
-          headers['anthropic-client-version'] = appVersion;
-          headers['anthropic-client-os-platform'] = 'darwin';
-          headers['anthropic-client-os-version'] = '14.0';
-          headers['anthropic-desktop-topbar'] = '1';
-        }
-      } catch (e) { /* URL parse error — pass through */ }
-      callback({ requestHeaders: headers });
-    });
-    console.log('[Headers] Anthropic desktop headers configured');
+    const webReq = session.defaultSession.webRequest;
+    const origOnBefore = webReq.onBeforeSendHeaders.bind(webReq);
+    let headerLogCount = 0;
+
+    webReq.onBeforeSendHeaders = function(...args) {
+      // onBeforeSendHeaders(filter, listener) or onBeforeSendHeaders(listener)
+      const listener = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (!listener) return origOnBefore(...args);
+
+      const wrappedListener = (details, callback) => {
+        listener(details, (result) => {
+          const headers = result?.requestHeaders || details.requestHeaders;
+          try {
+            const url = new URL(details.url);
+            if (url.host === 'claude.ai' || url.host.endsWith('.claude.ai')) {
+              // Fix: Remove lowercase anthropic-* headers set by the web code.
+              // The web code (from claude.ai) sets its own lowercase headers like
+              // "anthropic-client-platform: web_claude_ai". The bundle's Spe() adds
+              // capitalized headers like "Anthropic-Client-Platform: desktop_app".
+              // HTTP headers are case-insensitive, so both reach the server, causing
+              // the server to see "web_claude_ai" and serve web-mode configuration.
+              // We remove the web code's lowercase headers so only the bundle's
+              // desktop_app headers are sent.
+              for (const key of Object.keys(headers)) {
+                if (key.startsWith('anthropic-') && key === key.toLowerCase()) {
+                  delete headers[key];
+                }
+              }
+
+              // Log first 5 API requests for diagnostics
+              if (url.pathname.startsWith('/api/') && headerLogCount < 5) {
+                headerLogCount++;
+                const anthHeaders = Object.entries(headers)
+                  .filter(([k]) => k.toLowerCase().startsWith('anthropic'))
+                  .map(([k, v]) => `${k}: ${v}`);
+                const ua = headers['User-Agent'] || headers['user-agent'] || '';
+                const uaShort = ua.includes('ClaudeNest') ? 'ClaudeNest/' + (ua.match(/ClaudeNest\/(\S+)/)?.[1] || '?')
+                  : ua.includes('Claude/') ? 'Claude/' + (ua.match(/Claude\/(\S+)/)?.[1] || '?')
+                  : 'no-Claude-in-UA';
+                console.log(`[Headers] ${url.pathname} => ${anthHeaders.join(', ')} | UA: ${uaShort}`);
+              }
+            }
+          } catch (e) { /* URL parse error */ }
+          callback({ requestHeaders: headers });
+        });
+      };
+
+      args[args.length - 1] = wrappedListener;
+      return origOnBefore(...args);
+    };
+    console.log('[Headers] Header interception configured');
   } catch (e) {
     console.error('[Headers] Failed:', e.message);
   }
+});
+
+// Diagnostic: Capture renderer console output + probe desktop APIs
+app.whenReady().then(() => {
+  app.on('web-contents-created', (_event, contents) => {
+    const cType = contents.getType();
+    console.log(`[DIAG] web-contents-created: type=${cType}`);
+
+    // Wrap webContents.ipc.handle to intercept scoped handler registrations.
+    // The bundle registers handlers via webContents.ipc.handle() (not ipcMain.handle()),
+    // which bypasses our ipcMain wrappers. This intercepts those registrations.
+    if (contents.ipc && typeof contents.ipc.handle === 'function') {
+      const origWcHandle = contents.ipc.handle.bind(contents.ipc);
+      contents.ipc.handle = function(channel, handler) {
+        const name = shortChannelName(channel);
+        if (name.includes('AppFeatures') || name.includes('ClaudeVM') || name.includes('LocalAgent')) {
+          console.log(`[IPC:WC] scoped handle() registering: ${name}`);
+        }
+        // Wrap getSupportedFeatures to log response/errors
+        if (name.includes('getSupportedFeatures')) {
+          const wrapped = async (event, ...args) => {
+            try {
+              const result = await handler(event, ...args);
+              console.log(`[IPC:WC] ${name} => ${describeResult(result)}`);
+              return result;
+            } catch (e) {
+              console.error(`[IPC:WC] ${name} => ERROR: ${e.message}`);
+              throw e;
+            }
+          };
+          return origWcHandle(channel, wrapped);
+        }
+        return origWcHandle(channel, handler);
+      };
+      const origWcRemove = contents.ipc.removeHandler.bind(contents.ipc);
+      contents.ipc.removeHandler = function(channel) {
+        const name = shortChannelName(channel);
+        if (name.includes('AppFeatures')) {
+          console.log(`[IPC:WC] scoped removeHandler: ${name}`);
+        }
+        return origWcRemove(channel);
+      };
+    }
+
+    // Capture ALL renderer console output to main process stdout
+    contents.on('console-message', (_e, level, message, line, sourceId) => {
+      const src = sourceId ? sourceId.split('/').pop() : '';
+      if (message.includes('BRIDGE') || message.includes('DESKTOP_API') ||
+          message.includes('YukonSilver') || message.includes('API_DIAG') ||
+          message.includes('Cowork') || message.includes('cowork') ||
+          message.includes('INTERCEPT') || message.includes('[BIND]') ||
+          message.includes('CHUNK_ANALYSIS') || message.includes('[BOOT]')) {
+        console.log(`[RENDERER:${level}] ${message} (${src}:${line})`);
+      }
+    });
+
+    contents.on('dom-ready', () => {
+      const url = contents.getURL();
+      console.log(`[DIAG] dom-ready: type=${cType} url=${url.slice(0, 80)}`);
+      if (url.includes('claude.ai')) {
+        // Open DevTools for debugging (remove after investigation)
+        if (process.argv.includes('--devtools')) {
+          try { contents.openDevTools({ mode: 'detach' }); } catch(e) {}
+        }
+        // Inject desktopBootFeatures BEFORE web code reads it
+        contents.executeJavaScript(`
+          window.desktopBootFeatures = {
+            nativeQuickEntry: true,
+            quickEntryDictation: true,
+            cowork: true,
+            yukonSilver: true,
+            localAgentMode: true,
+            extensions: true,
+            mcp: true
+          };
+          console.log('[BOOT] Injected desktopBootFeatures');
+        `).catch(() => {});
+        contents.executeJavaScript(`
+          (() => {
+            const L = console.log.bind(console);
+            // Log exposed APIs
+            const namespaces = ['claude.settings', 'claude.web', 'claude.hybrid'];
+            for (const ns of namespaces) {
+              const obj = window[ns];
+              if (obj) {
+                const keys = Object.keys(obj);
+                L('[API_DIAG] ' + ns + ': ' + keys.join(', '));
+                for (const k of keys) {
+                  if (typeof obj[k] === 'object' && obj[k]) {
+                    L('[API_DIAG]   ' + ns + '.' + k + ': ' + Object.keys(obj[k]).join(', '));
+                  }
+                }
+              }
+            }
+            // Probe: Call getSupportedFeatures to verify IPC response
+            try {
+              const af = window['claude.settings']?.AppFeatures;
+              if (af && typeof af.getSupportedFeatures === 'function') {
+                L('[API_DIAG] Calling AppFeatures.getSupportedFeatures()...');
+                af.getSupportedFeatures()
+                  .then(v => L('[API_DIAG] getSupportedFeatures resolved: ' + JSON.stringify(v)))
+                  .catch(e => L('[API_DIAG] getSupportedFeatures rejected: ' + e));
+              } else {
+                L('[API_DIAG] AppFeatures.getSupportedFeatures NOT available');
+              }
+            } catch(e) { L('[API_DIAG] probe error: ' + e); }
+            // Also check ClaudeVM availability
+            try {
+              const cv = window['claude.settings']?.ClaudeVM;
+              if (cv && typeof cv.getSupportStatus === 'function') {
+                cv.getSupportStatus()
+                  .then(v => L('[API_DIAG] ClaudeVM.getSupportStatus resolved: ' + JSON.stringify(v)))
+                  .catch(e => L('[API_DIAG] ClaudeVM.getSupportStatus rejected: ' + e));
+              } else {
+                L('[API_DIAG] ClaudeVM.getSupportStatus NOT available');
+              }
+            } catch(e) { L('[API_DIAG] probe error: ' + e); }
+            // Check for other desktop binding mechanisms
+            const checks = [
+              'claudeAppBindings', 'electronAPI', '__CLAUDE_DESKTOP__',
+              'desktopAPI', 'nativeAPI', '__electron__'
+            ];
+            for (const name of checks) {
+              if (window[name]) {
+                L('[API_DIAG] Found window.' + name + ': ' +
+                  typeof window[name] + ' keys=' +
+                  (typeof window[name] === 'object' ? Object.keys(window[name]).join(',') : 'N/A'));
+              }
+            }
+            // Dump window.process to understand what web code sees
+            L('[BOOT] window.process: ' + JSON.stringify({
+              platform: window.process?.platform,
+              arch: window.process?.arch,
+              isInternalBuild: window.process?.isInternalBuild,
+              isPackaged: window.process?.isPackaged,
+              keys: window.process ? Object.keys(window.process).join(',') : 'N/A'
+            }));
+            // Check desktopBootFeatures and other runtime state
+            setTimeout(() => {
+              const dbf = window.desktopBootFeatures;
+              L('[BOOT] desktopBootFeatures: ' + (dbf ? JSON.stringify(dbf).slice(0, 500) : 'NOT FOUND'));
+              // Check all window properties that might be desktop-related
+              const desktopProps = Object.keys(window).filter(k =>
+                k.includes('desktop') || k.includes('Desktop') || k.includes('claude') ||
+                k.includes('Claude') || k.includes('electron') || k.includes('Electron') ||
+                k.includes('yukon') || k.includes('Yukon') || k.includes('cowork') || k.includes('Cowork')
+              );
+              L('[BOOT] Desktop-related window props: ' + desktopProps.join(', '));
+            }, 3000);
+          })();
+        `).catch(e => console.log('[DIAG] executeJS error:', e.message));
+      }
+    });
+  });
 });
 
 // ============================================================
