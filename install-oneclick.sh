@@ -100,20 +100,18 @@ detect_pkg_manager() {
 # Dependency Installation
 # ============================================================
 
-install_dependencies() {
-
 # Portable file size formatter (replacement for numfmt)
 format_size() {
     local size=$1
     local units=("B" "KB" "MB" "GB" "TB")
     local unit=0
     local num=$size
-    
+
     while (( num > 1024 && unit < 4 )); do
         num=$((num / 1024))
         unit=$((unit + 1))
     done
-    
+
     echo "${num}${units[$unit]}"
 }
 
@@ -121,14 +119,14 @@ format_size() {
 verify_checksum() {
     local file_path="$1"
     local expected_sha256="${CLAUDE_DMG_SHA256:-}"
-    
+
     if [[ -z "$expected_sha256" ]]; then
         log_warn "No SHA256 checksum provided (set CLAUDE_DMG_SHA256=<hash> to verify)"
         log_info "Anthropic does not publish official checksums for Claude Desktop DMG"
         log_info "Download source: $DMG_URL_PRIMARY"
         return 0
     fi
-    
+
     log_info "Verifying SHA256 checksum..."
     local actual_sha256
     if command -v sha256sum >/dev/null 2>&1; then
@@ -139,14 +137,15 @@ verify_checksum() {
         log_warn "No SHA256 tool available (sha256sum or shasum required)"
         return 0
     fi
-    
+
     if [[ "$actual_sha256" != "$expected_sha256" ]]; then
         die "SHA256 checksum mismatch! Expected: $expected_sha256, Got: $actual_sha256"
     fi
-    
+
     log_success "SHA256 checksum verified"
 }
 
+install_dependencies() {
     log_info "Checking dependencies..."
 
     local pkg_manager
@@ -476,37 +475,12 @@ confirm_sudo_operations() {
     fi
 }
 
-install_app() {
-    local claude_app="$1"
-    local app_extract_dir="$2"
-
-    # Show what sudo operations will be performed
-    confirm_sudo_operations
-
-    log_info "Installing to $INSTALL_DIR..."
-
-    # Remove old installation (with safety check)
-    if [[ -d "$INSTALL_DIR" ]]; then
-        log_info "Removing previous installation..."
-        sudo rm -rf "$INSTALL_DIR"
-    fi
-
-    # Create directory structure
-    sudo mkdir -p "$INSTALL_DIR/Contents/"{MacOS,Resources,Frameworks}
-
-    # Copy extracted app code
-    sudo cp -r "$app_extract_dir" "$INSTALL_DIR/Contents/Resources/app"
-
-    # Copy resources from original app
-    sudo cp -r "$claude_app/Contents/Resources/"* "$INSTALL_DIR/Contents/Resources/" 2>/dev/null || true
-
-    # Create and install stubs
+install_stubs() {
     local stub_swift_dir="$INSTALL_DIR/Contents/Resources/stubs/@ant/claude-swift/js"
     local stub_native_dir="$INSTALL_DIR/Contents/Resources/stubs/@ant/claude-native"
 
     sudo mkdir -p "$stub_swift_dir" "$stub_native_dir"
 
-    # Download stubs from repo then copy
     download_swift_stub "$WORK_DIR/stubs/swift"
     download_native_stub "$WORK_DIR/stubs/native"
 
@@ -531,13 +505,13 @@ install_app() {
             log_success "Replaced native stub in $target"
         fi
     done
+}
 
-    # Create Linux loader
-    create_linux_loader "$INSTALL_DIR/Contents/Resources"
-
-    # Patch EIPC UUID in linux-loader.js to match the app bundle
+patch_bundle() {
     local loader_js="$INSTALL_DIR/Contents/Resources/linux-loader.js"
     local bundle_index="$INSTALL_DIR/Contents/Resources/app/.vite/build/index.js"
+
+    # Patch EIPC UUID in linux-loader.js to match the app bundle
     if [[ -f "$loader_js" ]] && [[ -f "$bundle_index" ]]; then
         local bundle_uuid
         bundle_uuid=$(grep -oP '\$eipc_message\$_\K[a-f0-9-]{36}' "$bundle_index" | head -1 || true)
@@ -550,9 +524,8 @@ install_app() {
     fi
 
     # Disable EIPC origin validation for file:// URLs
-    # The app's EIPC handlers validate senderFrame.parent === null, which fails
-    # for our file:// renderer pages. Multiple minified copies exist with
-    # different function names (e.g. ki, _C), so use a general regex.
+    # The app validates senderFrame.parent === null, which fails for file:// pages.
+    # Multiple minified copies exist with different function names, so use a general regex.
     if [[ -f "$bundle_index" ]]; then
         local val_count
         val_count=$(grep -cP 'function \w+\(t\)\{var e;return\(\(e=t\.senderFrame\)==null\?void 0:e\.parent\)===null\}' "$bundle_index" || true)
@@ -566,15 +539,12 @@ install_app() {
 
     # Apply Cowork enablement patch
     local cowork_patch="$SCRIPT_DIR/patches/enable-cowork.py"
-    local bundle_index="$INSTALL_DIR/Contents/Resources/app/.vite/build/index.js"
     if [[ -f "$cowork_patch" ]] && [[ -f "$bundle_index" ]]; then
         log_info "Applying Cowork enablement patch..."
         sudo python3 "$cowork_patch" "$bundle_index" || log_warn "Cowork patch failed (non-fatal)"
     fi
 
     # Inject Cowork IPC bridges into mainView.js preload
-    # Newer bundles removed ClaudeVM/YukonSilver bridges from the preload,
-    # so the web code cannot communicate Cowork state to the main process.
     local bridge_patch="$SCRIPT_DIR/patches/inject-cowork-bridge.py"
     local mainview_js="$INSTALL_DIR/Contents/Resources/app/.vite/build/mainView.js"
     if [[ -f "$bridge_patch" ]] && [[ -f "$mainview_js" ]]; then
@@ -595,7 +565,9 @@ install_app() {
     else
         die "frame-fix stubs or app dir not found"
     fi
+}
 
+setup_symlinks() {
     # Symlink i18n locale files into app/resources/i18n/
     # The app expects them at app/resources/i18n/*.json but asar extracts them to Resources/*.json
     local i18n_dir="$INSTALL_DIR/Contents/Resources/app/resources/i18n"
@@ -609,7 +581,9 @@ install_app() {
     # Electron resolves preload paths relative to Resources/, not Resources/app/
     sudo ln -sfn app/.vite "$INSTALL_DIR/Contents/Resources/.vite"
     log_success "Linked .vite preload scripts"
+}
 
+install_icons() {
     # Extract Linux-compatible PNG icons from electron.icns (macOS format)
     # icns is a container with embedded PNG data — no external dependencies needed.
     local icns_file="$INSTALL_DIR/Contents/Resources/electron.icns"
@@ -618,7 +592,7 @@ install_app() {
         sudo mkdir -p "$icons_dst"
         sudo python3 -c "
 import struct, sys
-# icns type → nominal size (modern types embed PNG directly)
+# icns type -> nominal size (modern types embed PNG directly)
 TYPE_SIZE = {
     b'ic07': 128, b'ic08': 256, b'ic09': 512, b'ic10': 1024,
     b'ic11': 32,  b'ic12': 64,  b'ic13': 256, b'ic14': 512,
@@ -628,7 +602,7 @@ data = open('$icns_file', 'rb').read()
 if data[:4] != b'icns':
     sys.exit('Not an icns file')
 pos, total = 8, struct.unpack('>I', data[4:8])[0]
-best = {}  # size → png_data (keep largest variant per size)
+best = {}  # size -> png_data (keep largest variant per size)
 while pos < total:
     etype, esize = data[pos:pos+4], struct.unpack('>I', data[pos+4:pos+8])[0]
     payload = data[pos+8:pos+esize]
@@ -642,8 +616,32 @@ for size, png in sorted(best.items()):
 print(f'Extracted {len(best)} icons: {sorted(best.keys())}')
 " && log_success "Extracted PNG icons from electron.icns"
     fi
+}
 
-    # Create launcher
+install_app() {
+    local claude_app="$1"
+    local app_extract_dir="$2"
+
+    confirm_sudo_operations
+
+    log_info "Installing to $INSTALL_DIR..."
+
+    # Remove old installation
+    if [[ -d "$INSTALL_DIR" ]]; then
+        log_info "Removing previous installation..."
+        sudo rm -rf "$INSTALL_DIR"
+    fi
+
+    # Create directory structure and copy app
+    sudo mkdir -p "$INSTALL_DIR/Contents/"{MacOS,Resources,Frameworks}
+    sudo cp -r "$app_extract_dir" "$INSTALL_DIR/Contents/Resources/app"
+    sudo cp -r "$claude_app/Contents/Resources/"* "$INSTALL_DIR/Contents/Resources/" 2>/dev/null || true
+
+    install_stubs
+    create_linux_loader "$INSTALL_DIR/Contents/Resources"
+    patch_bundle
+    setup_symlinks
+    install_icons
     create_launcher "$INSTALL_DIR/Contents/MacOS"
 
     # Create symlink in PATH
