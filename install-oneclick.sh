@@ -451,7 +451,7 @@ if [[ -n "$WAYLAND_DISPLAY" ]] || [[ "$XDG_SESSION_TYPE" == "wayland" ]]; then
 fi
 
 # Launch Electron
-exec electron linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | tee -a ~/Library/Logs/Claude/startup.log
+exec electron --class=Claude linux-loader.js "${ELECTRON_ARGS[@]}" 2>&1 | tee -a ~/Library/Logs/Claude/startup.log
 LAUNCHER
 
     sudo chmod +x "$macos_dir/Claude"
@@ -467,7 +467,7 @@ confirm_sudo_operations() {
     log_warn "The following operations require sudo (root) privileges:"
     echo "  - Create directory: $INSTALL_DIR"
     echo "  - Copy application files to $INSTALL_DIR"
-    echo "  - Create symlink: /usr/local/bin/claude"
+    echo "  - Create symlink: /usr/local/bin/claude-desktop"
     echo ""
     read -r -p "Proceed with installation? [Y/n] " response
     response=${response:-Y}
@@ -610,6 +610,39 @@ install_app() {
     sudo ln -sfn app/.vite "$INSTALL_DIR/Contents/Resources/.vite"
     log_success "Linked .vite preload scripts"
 
+    # Extract Linux-compatible PNG icons from electron.icns (macOS format)
+    # icns is a container with embedded PNG data — no external dependencies needed.
+    local icns_file="$INSTALL_DIR/Contents/Resources/electron.icns"
+    local icons_dst="$INSTALL_DIR/Contents/Resources/icons"
+    if [[ -f "$icns_file" ]]; then
+        sudo mkdir -p "$icons_dst"
+        sudo python3 -c "
+import struct, sys
+# icns type → nominal size (modern types embed PNG directly)
+TYPE_SIZE = {
+    b'ic07': 128, b'ic08': 256, b'ic09': 512, b'ic10': 1024,
+    b'ic11': 32,  b'ic12': 64,  b'ic13': 256, b'ic14': 512,
+}
+PNG_MAGIC = b'\x89PNG'
+data = open('$icns_file', 'rb').read()
+if data[:4] != b'icns':
+    sys.exit('Not an icns file')
+pos, total = 8, struct.unpack('>I', data[4:8])[0]
+best = {}  # size → png_data (keep largest variant per size)
+while pos < total:
+    etype, esize = data[pos:pos+4], struct.unpack('>I', data[pos+4:pos+8])[0]
+    payload = data[pos+8:pos+esize]
+    if etype in TYPE_SIZE and payload[:4] == PNG_MAGIC:
+        size = TYPE_SIZE[etype]
+        if size not in best or len(payload) > len(best[size]):
+            best[size] = payload
+    pos += esize
+for size, png in sorted(best.items()):
+    open(f'$icons_dst/claude-{size}.png', 'wb').write(png)
+print(f'Extracted {len(best)} icons: {sorted(best.keys())}')
+" && log_success "Extracted PNG icons from electron.icns"
+    fi
+
     # Create launcher
     create_launcher "$INSTALL_DIR/Contents/MacOS"
 
@@ -674,8 +707,8 @@ create_desktop_entry() {
 Type=Application
 Name=Claude
 Comment=AI assistant by Anthropic
-Exec=/usr/local/bin/claude
-Icon=$INSTALL_DIR/Contents/Resources/icon.icns
+Exec=/usr/local/bin/claude-desktop
+Icon=$INSTALL_DIR/Contents/Resources/icons/claude-256.png
 Terminal=false
 Categories=Utility;Development;Chat;
 Keywords=AI;assistant;chat;anthropic;

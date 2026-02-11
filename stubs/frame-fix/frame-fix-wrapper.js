@@ -287,6 +287,13 @@ Module.prototype.require = function(id) {
           // Remove custom titlebar options
           delete options.titleBarStyle;
           delete options.titleBarOverlay;
+          // Set window icon (Linux doesn't get it from the app bundle like macOS)
+          if (!options.icon) {
+            const iconPath = path.join(__dirname, '..', 'icons', 'claude-256.png');
+            if (fs.existsSync(iconPath)) {
+              options.icon = iconPath;
+            }
+          }
           console.log(`[Frame Fix] Modified frame from ${originalFrame} to true`);
         }
         super(options);

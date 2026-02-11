@@ -5,6 +5,9 @@ linux-app-extracted/
 squashfs-root/
 claude-app-*/
 
+# Generated icons (extracted from DMG at install time)
+icons/
+
 # Binaries
 *.AppImage
 *.dmg

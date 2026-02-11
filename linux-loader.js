@@ -271,6 +271,11 @@ try {
   app.getVersion = () => correctVersion;
 }
 
+// Set desktop filename so GNOME Wayland matches the window to claude.desktop
+if (typeof app.setDesktopName === 'function') {
+  app.setDesktopName('claude.desktop');
+}
+
 // User-Agent must contain "Claude/<version>" so the bundle's Spe() can replace
 // it with "ClaudeNest/<version>". The web code from claude.ai checks for
 // "ClaudeNest" in UA to determine desktop mode (vs web_claude_ai).
