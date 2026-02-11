@@ -37,8 +37,8 @@ DMG_URL_FALLBACK="https://claude.ai/api/desktop/darwin/universal/dmg/latest/redi
 
 # Stub download URLs (from GitHub repo)
 REPO_BASE="https://raw.githubusercontent.com/johnzfitch/claude-cowork-linux/master"
-SWIFT_STUB_URL="${REPO_BASE}/stubs/@ant/claude-swift/js/index.js"
-NATIVE_STUB_URL="${REPO_BASE}/stubs/@ant/claude-native/index.js"
+SWIFT_STUB_URL="${REPO_BASE}/src/stubs/@ant/claude-swift/js/index.js"
+NATIVE_STUB_URL="${REPO_BASE}/src/stubs/@ant/claude-native/index.js"
 
 # Minimum expected DMG size (100MB) - basic integrity check
 MIN_DMG_SIZE=100000000
@@ -365,7 +365,7 @@ extract_asar() {
 download_swift_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-    local local_stub="$SCRIPT_DIR/stubs/@ant/claude-swift/js/index.js"
+    local local_stub="$SCRIPT_DIR/src/stubs/@ant/claude-swift/js/index.js"
     if [[ -f "$local_stub" ]]; then
         cp "$local_stub" "$stub_dir/index.js" || die "Failed to copy local Swift stub"
         log_success "Copied Swift stub from local repo"
@@ -378,7 +378,7 @@ download_swift_stub() {
 download_native_stub() {
     local stub_dir="$1"
     mkdir -p "$stub_dir"
-    local local_stub="$SCRIPT_DIR/stubs/@ant/claude-native/index.js"
+    local local_stub="$SCRIPT_DIR/src/stubs/@ant/claude-native/index.js"
     if [[ -f "$local_stub" ]]; then
         cp "$local_stub" "$stub_dir/index.js" || die "Failed to copy local Native stub"
         log_success "Copied Native stub from local repo"
@@ -394,12 +394,14 @@ download_native_stub() {
 
 create_linux_loader() {
     local resources_dir="$1"
-    local local_loader="$SCRIPT_DIR/linux-loader.js"
+    local local_loader="$SCRIPT_DIR/src/linux-loader.js"
 
     if [[ -f "$local_loader" ]]; then
         sudo cp "$local_loader" "$resources_dir/linux-loader.js"
         sudo chmod +x "$resources_dir/linux-loader.js"
-        log_success "Copied Linux loader from local repo"
+        # Copy lib/ modules alongside the loader
+        sudo cp -r "$SCRIPT_DIR/src/lib" "$resources_dir/lib"
+        log_success "Copied Linux loader + lib/ from local repo"
     else
         die "linux-loader.js not found at $local_loader"
     fi
@@ -538,32 +540,32 @@ patch_bundle() {
     fi
 
     # Apply Cowork enablement patch
-    local cowork_patch="$SCRIPT_DIR/patches/enable-cowork.py"
+    local cowork_patch="$SCRIPT_DIR/scripts/enable-cowork.js"
     if [[ -f "$cowork_patch" ]] && [[ -f "$bundle_index" ]]; then
         log_info "Applying Cowork enablement patch..."
-        sudo python3 "$cowork_patch" "$bundle_index" || log_warn "Cowork patch failed (non-fatal)"
+        sudo "$(which node)" "$cowork_patch" "$bundle_index" || log_warn "Cowork patch failed (non-fatal)"
     fi
 
     # Inject Cowork IPC bridges into mainView.js preload
-    local bridge_patch="$SCRIPT_DIR/patches/inject-cowork-bridge.py"
+    local bridge_patch="$SCRIPT_DIR/scripts/inject-cowork-bridge.js"
     local mainview_js="$INSTALL_DIR/Contents/Resources/app/.vite/build/mainView.js"
     if [[ -f "$bridge_patch" ]] && [[ -f "$mainview_js" ]]; then
         log_info "Injecting Cowork IPC bridges into preload..."
-        sudo python3 "$bridge_patch" "$mainview_js" || log_warn "Cowork bridge injection failed (non-fatal)"
+        sudo "$(which node)" "$bridge_patch" "$mainview_js" || log_warn "Cowork bridge injection failed (non-fatal)"
     fi
 
     # Copy frame-fix files into app/ and symlink linux-app-extracted -> app
     # linux-loader.js requires ./linux-app-extracted/frame-fix-entry.js
     # frame-fix-entry.js requires ./.vite/build/index.js (relative to itself)
     local app_dir="$INSTALL_DIR/Contents/Resources/app"
-    local local_frame_fix="$SCRIPT_DIR/stubs/frame-fix"
-    if [[ -d "$local_frame_fix" ]] && [[ -d "$app_dir" ]]; then
-        sudo cp "$local_frame_fix/frame-fix-entry.js" "$app_dir/frame-fix-entry.js"
-        sudo cp "$local_frame_fix/frame-fix-wrapper.js" "$app_dir/frame-fix-wrapper.js"
+    local local_app_dir="$SCRIPT_DIR/src/app"
+    if [[ -d "$local_app_dir" ]] && [[ -d "$app_dir" ]]; then
+        sudo cp "$local_app_dir/frame-fix-entry.js" "$app_dir/frame-fix-entry.js"
+        sudo cp "$local_app_dir/frame-fix-wrapper.js" "$app_dir/frame-fix-wrapper.js"
         sudo ln -sfn app "$INSTALL_DIR/Contents/Resources/linux-app-extracted"
         log_success "Copied frame-fix files and created linux-app-extracted symlink"
     else
-        die "frame-fix stubs or app dir not found"
+        die "frame-fix files or app dir not found"
     fi
 }
 
@@ -585,36 +587,11 @@ setup_symlinks() {
 
 install_icons() {
     # Extract Linux-compatible PNG icons from electron.icns (macOS format)
-    # icns is a container with embedded PNG data — no external dependencies needed.
     local icns_file="$INSTALL_DIR/Contents/Resources/electron.icns"
     local icons_dst="$INSTALL_DIR/Contents/Resources/icons"
     if [[ -f "$icns_file" ]]; then
-        sudo mkdir -p "$icons_dst"
-        sudo python3 -c "
-import struct, sys
-# icns type -> nominal size (modern types embed PNG directly)
-TYPE_SIZE = {
-    b'ic07': 128, b'ic08': 256, b'ic09': 512, b'ic10': 1024,
-    b'ic11': 32,  b'ic12': 64,  b'ic13': 256, b'ic14': 512,
-}
-PNG_MAGIC = b'\x89PNG'
-data = open('$icns_file', 'rb').read()
-if data[:4] != b'icns':
-    sys.exit('Not an icns file')
-pos, total = 8, struct.unpack('>I', data[4:8])[0]
-best = {}  # size -> png_data (keep largest variant per size)
-while pos < total:
-    etype, esize = data[pos:pos+4], struct.unpack('>I', data[pos+4:pos+8])[0]
-    payload = data[pos+8:pos+esize]
-    if etype in TYPE_SIZE and payload[:4] == PNG_MAGIC:
-        size = TYPE_SIZE[etype]
-        if size not in best or len(payload) > len(best[size]):
-            best[size] = payload
-    pos += esize
-for size, png in sorted(best.items()):
-    open(f'$icons_dst/claude-{size}.png', 'wb').write(png)
-print(f'Extracted {len(best)} icons: {sorted(best.keys())}')
-" && log_success "Extracted PNG icons from electron.icns"
+        sudo "$(which node)" "$SCRIPT_DIR/scripts/extract-icons.js" "$icns_file" "$icons_dst" \
+            && log_success "Extracted PNG icons from electron.icns"
     fi
 }
 

@@ -1,12 +1,12 @@
 # Extracted Claude Desktop app (proprietary - do not commit)
-app/
-app-extracted/
-linux-app-extracted/
+/app/
+/app-extracted/
+/linux-app-extracted/
 squashfs-root/
 claude-app-*/
 
 # Generated icons (extracted from DMG at install time)
-icons/
+/icons/
 
 # Binaries
 *.AppImage
@@ -25,7 +25,6 @@ package-lock.json
 
 # Build artifacts
 pkg/
-src/
 
 # OS / editor
 .DS_Store

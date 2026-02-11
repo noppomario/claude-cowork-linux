@@ -19,8 +19,8 @@ cd claude-cowork-linux
 ### Requirements
 
 - Linux (tested on Fedora 43 / GNOME / Wayland)
-- Node.js >= 18
-- Electron, 7zip (or p7zip)
+- System packages: `p7zip`, `bubblewrap`, `nodejs` (>= 18), `npm`
+- npm packages (auto-installed): `electron`, `@electron/asar`
 - ~500 MB disk space
 
 ## Usage
