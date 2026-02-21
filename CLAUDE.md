@@ -31,3 +31,7 @@ No build step, no test suite. Scripts run directly via bash/node.
 ## Patch Fragility
 
 Bundle patches (`scripts/enable-cowork.js`, `scripts/inject-cowork-bridge.js`) rely on specific minification patterns. Upstream Claude releases may break these regex patterns — this is the most common breakage point.
+
+## Session Handoff
+
+Read `HANDOFF.md` (gitignored, written in Japanese) at the start of each session for current status, open issues, and next actions. Update it before ending a session with any new findings or changes.

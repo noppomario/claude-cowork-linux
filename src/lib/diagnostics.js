@@ -24,7 +24,14 @@ module.exports = function({ app, shortChannelName, describeResult }) {
           if (name.includes('AppFeatures') || name.includes('ClaudeVM') || name.includes('LocalAgent')) {
             console.log(`[IPC:WC] scoped handle() registering: ${name}`);
           }
-          if (name.includes('getSupportedFeatures')) {
+          // Replace QuickEntry scoped handlers with no-ops to prevent
+          // Dt.setRecentChats/setActiveChatId crashes in the bundle
+          if (name.includes('QuickEntry')) {
+            console.log(`[IPC:WC] Replacing QuickEntry scoped handler: ${name}`);
+            return origWcHandle(channel, async () => ({ success: true }));
+          }
+          // Log getSupportedFeatures and getAppConfig responses
+          if (name.includes('getSupportedFeatures') || name.includes('getAppConfig')) {
             const wrapped = async (event, ...args) => {
               try {
                 const result = await handler(event, ...args);
@@ -80,6 +87,49 @@ module.exports = function({ app, shortChannelName, describeResult }) {
               mcp: true
             };
             console.log('[BOOT] Injected desktopBootFeatures');
+          `).catch(() => {});
+          // Intercept fetch to log 4xx/5xx responses (all URLs)
+          contents.executeJavaScript(`
+            (() => {
+              const origFetch = window.fetch;
+              window.fetch = async function(...args) {
+                const resp = await origFetch.apply(this, args);
+                if (resp.status >= 400) {
+                  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+                  console.log('[FETCH_DIAG] ' + resp.status + ' ' + u.split('?')[0]);
+                }
+                return resp;
+              };
+              // Also intercept XMLHttpRequest
+              const origXHROpen = XMLHttpRequest.prototype.open;
+              const origXHRSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                this._diagUrl = url;
+                return origXHROpen.call(this, method, url, ...rest);
+              };
+              XMLHttpRequest.prototype.send = function(...args) {
+                this.addEventListener('load', function() {
+                  if (this.status >= 400) {
+                    console.log('[XHR_DIAG] ' + this.status + ' ' + (this._diagUrl || '').split('?')[0]);
+                  }
+                });
+                return origXHRSend.apply(this, args);
+              };
+              console.log('[FETCH_DIAG] Fetch+XHR interceptor installed');
+            })();
+          `).catch(() => {});
+          // Probe getAppConfig to see cowork flags
+          contents.executeJavaScript(`
+            (() => {
+              const ac = window['claude.settings']?.AppConfig;
+              if (ac && typeof ac.getAppConfig === 'function') {
+                ac.getAppConfig()
+                  .then(v => console.log('[DIAG] getAppConfig => ' + JSON.stringify(v).slice(0, 500)))
+                  .catch(e => console.log('[DIAG] getAppConfig error: ' + e));
+              } else {
+                console.log('[DIAG] AppConfig.getAppConfig NOT available');
+              }
+            })();
           `).catch(() => {});
           contents.executeJavaScript(`
             (() => {

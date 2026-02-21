@@ -2,8 +2,9 @@
  * Anthropic desktop headers
  *
  * Intercepts onBeforeSendHeaders to:
- *   - Remove lowercase anthropic-* headers set by the web code
+ *   - Remove lowercase anthropic-client-* headers set by the web code
  *     (prevents server seeing "web_claude_ai" instead of "desktop_app")
+ *   - Preserve anthropic-version (API versioning header, not client identity)
  *   - Log API request headers for diagnostics
  */
 
@@ -19,6 +20,22 @@ module.exports = function({ app, session }) {
       const origOnBefore = webReq.onBeforeSendHeaders.bind(webReq);
       let headerLogCount = 0;
 
+      // Log API responses with error status codes (4xx/5xx)
+      const origOnCompleted = webReq.onCompleted?.bind(webReq);
+      const origOnErrorOccurred = webReq.onErrorOccurred?.bind(webReq);
+      if (origOnCompleted) {
+        webReq.onCompleted({ urls: ['*://claude.ai/api/*', '*://*.claude.ai/api/*'] }, (details) => {
+          if (details.statusCode >= 400) {
+            console.log(`[Headers] RESPONSE ${details.statusCode}: ${new URL(details.url).pathname}`);
+          }
+        });
+      }
+      if (origOnErrorOccurred) {
+        webReq.onErrorOccurred({ urls: ['*://claude.ai/api/*', '*://*.claude.ai/api/*'] }, (details) => {
+          console.log(`[Headers] NET_ERROR: ${details.error} ${new URL(details.url).pathname}`);
+        });
+      }
+
       webReq.onBeforeSendHeaders = function(...args) {
         const listener = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
         if (!listener) return origOnBefore(...args);
@@ -29,9 +46,11 @@ module.exports = function({ app, session }) {
             try {
               const url = new URL(details.url);
               if (url.host === 'claude.ai' || url.host.endsWith('.claude.ai')) {
-                // Remove lowercase anthropic-* headers from web code
+                // Remove lowercase anthropic-client-* headers from web code
+                // but preserve anthropic-version (required by the API)
                 for (const key of Object.keys(headers)) {
-                  if (key.startsWith('anthropic-') && key === key.toLowerCase()) {
+                  if (key.startsWith('anthropic-') && key === key.toLowerCase()
+                      && key !== 'anthropic-version') {
                     delete headers[key];
                   }
                 }

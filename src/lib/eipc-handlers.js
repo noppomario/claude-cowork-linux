@@ -138,6 +138,10 @@ module.exports = function({ ipcMain }) {
   registerHandler('WindowControl_$_setIncognitoMode', async () => ({ success: true }));
   registerHandler('WindowControl_$_getFullscreen', async () => false);
 
+  // ----- CustomPlugins / Extensions -----
+  registerHandler('CustomPlugins_$_listMarketplaces', async () => []);
+  registerHandler('CustomPlugins_$_listAvailablePlugins', async () => []);
+
   // ----- Misc -----
   registerHandler('LocalPlugins_$_getPlugins', async () => []);
   registerHandler('Account_$_setAccountDetails', async () => ({ success: true }));

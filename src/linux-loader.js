@@ -24,6 +24,9 @@ const { app, session, ipcMain } = electron;
 // Fix app version and spoof User-Agent for desktop mode detection
 require('./lib/version-ua')({ app, session });
 
+// Ensure claude_desktop_config.json includes cowork feature flags
+require('./lib/config-patch')({ app });
+
 // Wrap ipcMain to log calls, protect Cowork handlers, suppress errors
 const { shortChannelName, describeResult } = require('./lib/ipc-wrappers')({ ipcMain });
 
